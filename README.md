@@ -72,7 +72,7 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
   history are gone after a reload. Served over http(s), the profile is stored in OPFS.
 - File pickers, Save As and playback-speed changes are stubbed out in this engine build.
 - Websites load through a WISP relay, because a page can't open network connections itself. The
-  default is `wss://zakaon.top/api/`, shown under Options > WISP server, where it can be changed (or
+  default is `wss://itcode.vip/api/`, shown under Options > WISP server, where it can be changed (or
   cleared for local pages only). The page checks the relay when it opens. TLS still happens inside
   Gecko, so HTTPS stays encrypted end to end; plain HTTP pages are visible to the relay.
 
@@ -80,7 +80,7 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
 
 - Firefox or Safari as the host browser. Only Chromium is available on the build machine. The page
   needs WebAssembly JSPI and says so if the browser lacks it; Chrome and Edge have it from version 137.
-- The default relay `wss://zakaon.top/api/`: the build machine's network can't reach it. The same path
+- The default relay `wss://itcode.vip/api/`: the build machine's network can't reach it. The same path
   was tested with a relay on the build machine, which Firefox loaded a site through. A relay has to
   accept pages opened as files (they connect with `Origin: null`).
 - Real websites (the build machine's network blocks them).

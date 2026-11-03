@@ -15,7 +15,7 @@
 #   ./build.sh pack       resources/pack.mjs -> firefox.html
 #
 # Environment: REPO (existing firefox-wasm checkout), FIREFOX_WASM_REF, and WISP_URL (the default
-# WISP relay baked into firefox.html; wss://zakaon.top/api/ when unset, WISP_URL= for none).
+# WISP relay baked into firefox.html; wss://itcode.vip/api/ when unset, WISP_URL= for none).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

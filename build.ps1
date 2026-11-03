@@ -11,7 +11,7 @@
 
   Stages: all, deps, clone, engine, pack.
   -WispUrl wss://relay.example.com/  bakes another default WISP relay (for websites) into
-                                     firefox.html. Without it the default is wss://zakaon.top/api/.
+                                     firefox.html. Without it the default is wss://itcode.vip/api/.
 #>
 [CmdletBinding()]
 param(
