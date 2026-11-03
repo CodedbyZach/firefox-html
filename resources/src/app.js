@@ -23,6 +23,9 @@ const optJit = $('opt-jit');
 const optWisp = $('opt-wisp');
 const optStart = $('opt-start');
 const optQuiet = $('opt-quiet');
+const optRes = $('opt-res');
+const resApply = $('res-apply');
+const resCancel = $('res-cancel');
 
 // Firefox's own background calls seen in testing: Remote Settings
 // (firefox.settings.services.mozilla.com) and region lookup
@@ -149,6 +152,154 @@ function defaultWispUrl() {
     return u.href;
   }
   return '';
+}
+
+// ------------------------------------------------------------- resolution --
+// Options > Resolution: how many pixels Firefox is drawn with, at the same size. Above
+// Current the engine renders more device pixels per CSS pixel (Gecko's
+// layout.css.devPixelsPerPx), so text, images and edges get sharper. The step that matches
+// the screen's own pixels is the sharpest; higher ones are drawn bigger and shrunk smoothly
+// (supersampling). The steps are the usual widths up to 4K, plus the screen's own width on
+// a high-DPI display; the height follows the window's shape. Gecko keeps a whole number of
+// app units (60 per CSS pixel) per device pixel, so a step's ratio is rounded to 60 / n and
+// the page, the engine and mouse input agree exactly. Input goes to the engine in CSS pixels
+// (resolution-loader.mjs), and presses while a popup is open go through RES_PRESS_HANDLER.
+const RES_PREFS_PATH = 'browser/defaults/preferences/zz-firefox-html-resolution.js';
+// Installed in the chrome window when the ratio is above 1. The engine's own "press outside
+// an open popup closes it" test (embed-input.cpp) compares CSS pixels with popup bounds in
+// device pixels, so it would close a menu on a press inside it. This does that test in CSS
+// pixels instead: no popup open, the engine gets the press as usual ('none'); a press
+// outside every open popup closes the ones that close on outside clicks, and is consumed
+// like the engine does; otherwise it reaches the popup or page as a native widget press.
+// Tooltips don't count, as in the engine.
+const RES_PRESS_HANDLER = `(() => {
+  const open = new Set();
+  addEventListener('popupshown', (e) => { if (e.originalTarget.localName !== 'tooltip') open.add(e.originalTarget); }, true);
+  addEventListener('popuphidden', (e) => open.delete(e.originalTarget), true);
+  window.__fhtmlPress = (x, y, button) => {
+    for (const p of [...open]) if (!p.isConnected || p.state !== 'open') open.delete(p);
+    if (!open.size) return 'none';
+    const sx = x + mozInnerScreenX, sy = y + mozInnerScreenY;
+    const hit = (p) => { const r = p.getOuterScreenRect(); return sx >= r.left && sx < r.right && sy >= r.top && sy < r.bottom; };
+    const autohide = [...open].filter((p) => p.getAttribute('noautohide') !== 'true');
+    if (autohide.length && ![...open].some(hit)) {
+      for (const p of autohide) p.hidePopup();
+      return 'closed';
+    }
+    windowUtils.sendNativeMouseEvent(Math.round(sx * devicePixelRatio), Math.round(sy * devicePixelRatio),
+      windowUtils.NATIVE_MOUSE_MESSAGE_BUTTON_DOWN, button, 0, null);
+    return 'native';
+  };
+  return 'ok';
+})()`;
+const RES_STEPS = [
+  { name: '720p', width: 1280 },
+  { name: '900p', width: 1600 },
+  { name: '1080p', width: 1920 },
+  { name: '1440p', width: 2560 },
+  { name: '1800p', width: 3200 },
+  { name: '4K', width: 3840 },
+];
+let resStops = [{ name: 'Current', width: 0 }];
+let resApplied = 0; // width of the applied step; 0 = Current (the page's own size)
+let userGpu = false; // the GPU acceleration choice made in Options
+let launched = false;
+
+const pageW = () => Math.max(1, innerWidth);
+const pageH = () => Math.max(1, innerHeight);
+const screenW = () => Math.round(pageW() * (devicePixelRatio || 1));
+const geckoScale = (s) => 60 / Math.max(1, Math.round(60 / s));
+function resSize(width) {
+  const scale = width ? geckoScale(width / pageW()) : 1;
+  return { scale, width: Math.round(pageW() * scale), height: Math.round(pageH() * scale) };
+}
+// Index of the step for a width: that step, or the nearest one below it if the window
+// has grown past it since (steps under 5% above the page's width are left out).
+function resIndexFor(width) {
+  let best = 0;
+  resStops.forEach((s, i) => { if (s.width && s.width <= width) best = i; });
+  return best;
+}
+// The step in use: the applied one, or Current where the GPU renderer is missing.
+const resAppliedIndex = () => (env.webgl2 ? resIndexFor(resApplied) : 0);
+
+// Above Current the extra pixels have to come from the GPU renderer (WebRender): this
+// engine build's software renderer paints one pixel per CSS pixel at any ratio
+// (embed-paint.cpp, RenderDocument). So a Resolution above Current turns GPU acceleration
+// on and locks it; Current gives back the choice made in Options.
+function syncResGpu() {
+  const forced = resAppliedIndex() !== 0;
+  optGpu.checked = env.webgl2 && (forced || userGpu);
+  optGpu.disabled = !env.webgl2 || forced || launched;
+  $('gpu-forced').hidden = !forced;
+}
+
+function renderRes() {
+  const i = Number(optRes.value);
+  const { name, width: stepWidth } = resStops[i] || resStops[0];
+  const { width, height } = resSize(stepWidth);
+  const sw = screenW();
+  const pending = i !== resAppliedIndex();
+  const out = $('res-value');
+  const label = document.createElement('b');
+  label.textContent = name;
+  out.replaceChildren(label, ` ${width} × ${height}`);
+  if (Math.abs(width - sw) <= sw * 0.02) out.append(', matches your screen (sharpest)');
+  else if (width > sw) out.append(width / sw < 1.095 ? ', just above your screen' : `, ${(width / sw).toFixed(1)}× your screen's pixels`);
+  if (pending) out.append(Object.assign(document.createElement('em'), { textContent: ' (not applied)' }));
+  else if (!env.webgl2 && resStops.length > 1) out.append(' (higher steps need WebGL2, which this browser lacks)');
+  resApply.disabled = resCancel.disabled = !pending || optRes.disabled;
+}
+
+function layoutRes(selectedWidth) {
+  const steps = RES_STEPS.filter((s) => s.width >= pageW() * 1.05);
+  // A high-DPI screen's own width, unless a standard step is within 2% of it.
+  const sw = screenW();
+  if (sw >= pageW() * 1.05 && !steps.some((s) => Math.abs(s.width - sw) <= sw * 0.02)) {
+    steps.push({ name: 'Native', width: sw });
+    steps.sort((a, b) => a.width - b.width);
+  }
+  resStops = [{ name: 'Current', width: 0 }, ...steps];
+  optRes.max = String(resStops.length - 1);
+  optRes.disabled = resStops.length < 2 || !env.webgl2;
+  $('res-stops').replaceChildren(...resStops.map((s, i) =>
+    Object.assign(document.createElement('option'), { value: String(i), label: s.name })));
+  optRes.value = String(env.webgl2 ? resIndexFor(selectedWidth) : 0);
+  renderRes();
+}
+
+function setupRes(saved) {
+  resApplied = Number(saved.res) || 0;
+  layoutRes(resApplied);
+  syncResGpu();
+  optRes.addEventListener('input', renderRes);
+  resApply.addEventListener('click', () => {
+    resApplied = resStops[Number(optRes.value)].width;
+    const o = loadOpts();
+    o.res = resApplied;
+    saveOpts(o);
+    renderRes();
+    syncResGpu();
+  });
+  resCancel.addEventListener('click', () => {
+    optRes.value = String(resAppliedIndex());
+    renderRes();
+  });
+  // The steps depend on the window's size; keep the slider's choice while it changes.
+  let t;
+  addEventListener('resize', () => {
+    if (launched) return;
+    clearTimeout(t);
+    t = setTimeout(() => layoutRes(resStops[Number(optRes.value)]?.width ?? 0), 150);
+  });
+}
+
+// Fit the engine's pixels to the page: smooth when they are shrunk (more of them than the
+// screen has), pixelated as before when enlarged; and keep GPU mode's surfaces, which the
+// loader sizes to the engine's pixel count, filling the page (template.html: body.res-scaled).
+function fitScreen(engineWidth) {
+  canvas.classList.toggle('smooth', engineWidth > pageW() * devicePixelRatio + 0.5);
+  document.body.classList.toggle('res-scaled', engineWidth !== pageW());
 }
 
 // ------------------------------------------------------------ asset decode --
@@ -327,8 +478,10 @@ async function main() {
   setPhase('checking');
   await runChecks();
   // Off by default: in testing, GPU mode drew <canvas> content with red and blue swapped.
-  optGpu.checked = env.webgl2 && (saved.gpu ?? false);
-  optGpu.disabled = !env.webgl2;
+  userGpu = saved.gpu ?? false;
+  optGpu.addEventListener('change', () => { if (!optGpu.disabled) userGpu = optGpu.checked; });
+  // After the checks: a Resolution above Current needs WebGL2 (syncResGpu).
+  setupRes(saved);
   if ((env.threads.ok || env.coop) && env.jspi) {
     void refreshWisp();
     let wispTimer;
@@ -356,11 +509,16 @@ async function main() {
 }
 
 async function launch() {
+  launched = true;
   launchBtn.disabled = true;
   launchBtn.querySelector('span').textContent = 'Starting Firefox';
-  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet]) el.disabled = true;
+  // Apply is what sets the resolution; an unapplied slider position is dropped.
+  optRes.value = String(resAppliedIndex());
+  const useGpu = optGpu.checked; // on whenever the Resolution is above Current (syncResGpu)
+  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet, optRes]) el.disabled = true;
+  renderRes();
   setPhase('booting');
-  const opts = { gpu: optGpu.checked, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked };
+  const opts = { gpu: userGpu, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, res: resApplied };
   saveOpts(opts);
   if (opts.quiet) {
     addVirtualFile(decoded.chromeIndex, QUIET_PREFS_PATH, QUIET_PREFS);
@@ -368,7 +526,7 @@ async function launch() {
   }
 
   const engineEnv = { GECKO_CHROME: '1' };
-  if (opts.gpu) Object.assign(engineEnv, { GECKO_GPU: '1', GECKO_GL_PASSTHROUGH: '1', GECKO_WR_DIRECT: '1', GECKO_APZ: '1' });
+  if (useGpu) Object.assign(engineEnv, { GECKO_GPU: '1', GECKO_GL_PASSTHROUGH: '1', GECKO_WR_DIRECT: '1', GECKO_APZ: '1' });
   if (!opts.jit) engineEnv.GECKO_NOWASMJIT = '1';
   // Without OPFS (file:// pages) the native OPFS backend cannot start; this
   // documented engine switch keeps the profile on the in-memory WasmFS instead.
@@ -390,11 +548,24 @@ async function launch() {
     console.log('[firefox.html] single-thread mode: engine threads run cooperatively on the page thread');
   }
 
+  // Resolution (Options): device pixels per CSS pixel, kept when the window resizes. Gecko
+  // reads the ratio as a default pref at startup and lays out at the page's own size.
+  const res = resSize(resStops[resAppliedIndex()].width);
+  const engineSize = () => [Math.round(pageW() * res.scale), Math.round(pageH() * res.scale)];
+  const [engineW, engineH] = engineSize();
+  if (res.scale !== 1) {
+    addVirtualFile(decoded.chromeIndex, RES_PREFS_PATH,
+      `// Added by firefox.html: Options > Resolution.\npref("layout.css.devPixelsPerPx", "${res.scale}");\n`);
+  }
+  fitScreen(engineW);
+  console.log(`[firefox.html] resolution ${engineW}x${engineH}` +
+    (res.scale !== 1 ? ` (${res.scale.toFixed(3)} device pixels per CSS pixel)` : ''));
+
   const t0 = performance.now();
   const gecko = new Gecko({
     canvas,
-    width: innerWidth,
-    height: innerHeight,
+    width: engineW,
+    height: engineH,
     wasm: { url: decoded.wasmUrl, compressed: false },
     env: engineEnv,
     fs: decoded.chromeFs,
@@ -404,10 +575,15 @@ async function launch() {
     printErr: (s) => console.warn('[gecko]', s),
   });
   window.gecko = gecko;
+  gecko.cssScale = res.scale; // mouse input in CSS pixels (resolution-loader.mjs)
   try {
     await gecko.init();
     console.log(`[firefox.html] engine initialized in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     await gecko.load(BROWSER_CHROME_URL);
+    if (res.scale !== 1) {
+      const r = await gecko.evalChrome(RES_PRESS_HANDLER);
+      if (r !== 'ok') console.warn('[firefox.html] resolution: popup press handler not installed:', r);
+    }
     console.log(`[firefox.html] Firefox front-end booted in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     await gecko.evalChrome(`setToolbarVisibility(document.getElementById('PersonalToolbar'), 'never'); 'ok'`).catch(() => {});
     // Same one-time DuckDuckGo default as the official chrome-demo.
@@ -430,11 +606,16 @@ async function launch() {
     canvas.focus();
     window.geckoLoad = (u) => gecko.load(u);
     window.geckoEvalChrome = (js) => gecko.evalChrome(js);
-    window.__firefoxHtml = { booted: true, bootSeconds: (performance.now() - t0) / 1000, gpu: opts.gpu };
+    window.__firefoxHtml = { booted: true, bootSeconds: (performance.now() - t0) / 1000, gpu: useGpu, resolution: { width: engineW, height: engineH, scale: res.scale } };
 
-    await gecko.resize(innerWidth, innerHeight);
+    const resizeEngine = () => {
+      const [w, h] = engineSize();
+      fitScreen(w);
+      return gecko.resize(w, h);
+    };
+    await resizeEngine();
     let rt;
-    addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => gecko.resize(innerWidth, innerHeight), 200); });
+    addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(resizeEngine, 200); });
   } catch (e) {
     console.error('[firefox.html] startup failed', e);
     setPhase('error');

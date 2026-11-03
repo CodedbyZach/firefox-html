@@ -6,7 +6,7 @@ Double-click it: Firefox starts inside the page. Nothing to install, run or serv
 
 | File | Purpose |
 | --- | --- |
-| `firefox.html` | The single-file browser (80,325,334 bytes). |
+| `firefox.html` | The single-file browser (80,257,811 bytes). |
 | `build.sh` | Reproducible build on Linux (Ubuntu 24.04). |
 | `build.ps1` | The same build from PowerShell. On Windows it runs `build.sh` inside WSL 2; on Linux it calls it directly. |
 | `resources/` | What the build scripts use: the packer, the page source (`src/`) and the engine patches (`patches/`). |
@@ -16,7 +16,7 @@ Double-click it: Firefox starts inside the page. Nothing to install, run or serv
 | Question | Answer |
 | --- | --- |
 | Did the real Firefox engine build? | Yes. Gecko 153.0a1 compiled with emscripten 6.0.1 and Rust 1.95.0, plus the two patches in `resources/patches`. Build ID `20261103131955`. |
-| Final HTML size | 80,325,334 bytes (76.6 MiB). |
+| Final HTML size | 80,257,811 bytes (76.5 MiB). |
 | Does it work from `file://`? | Yes. Opened from disk with no browser flags, Firefox boots in about 5 to 7 s (Chrome 153). |
 | Does it require a local server? | No. Served from a web server it also works, with or without the two COOP/COEP headers. With them it uses real multi-threading. |
 | Which features work? | See "Tested" below. |
@@ -63,6 +63,12 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
 - **GPU mode** (off by default): works, with the same `<canvas>` red/blue swap as in the served build.
 - **Served with COOP/COEP** (multi-threaded): boots with 42 Workers, `about:robots` loads, 0 console
   errors.
+- **Resolution** (Options, Current up to 4K): Firefox keeps its size and is drawn with more pixels
+  (Gecko's device pixel ratio set to the step). On a 125% display, 1080p is 1:1 with the screen and
+  visibly sharper than Current; 4K is supersampled. At 1080p, 1440p and 4K it booted in 7 to 9 s, and
+  clicks (new tab, the address bar, items inside the app menu and the tab context menu), clicking
+  outside an open menu, typing and scrolling all worked. Tested from `file://` and served with
+  COOP/COEP, with the window resized before and after launch.
 
 **Doesn't work / limitations:**
 
@@ -71,6 +77,9 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
 - From `file://` the profile lives in memory (browser storage for files is limited), so cookies and
   history are gone after a reload. Served over http(s), the profile is stored in OPFS.
 - File pickers, Save As and playback-speed changes are stubbed out in this engine build.
+- Resolution above Current turns on GPU rendering, with its `<canvas>` color swap: this engine build's
+  software renderer paints one pixel per CSS pixel at any pixel ratio (`embed-paint.cpp`). Without
+  WebGL2 only Current is offered. Fixing the software renderer needs an engine rebuild.
 - Websites load through a WISP relay, because a page can't open network connections itself. The
   default is `wss://itcode.vip/api/`, shown under Options > WISP server, where it can be changed (or
   cleared for local pages only). The page checks the relay when it opens. TLS still happens inside
@@ -87,7 +96,7 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
 - Audio and video.
 - `build.ps1` on real Windows. It was run under PowerShell 7 with a simulated WSL.
 
-**Sharing on Discord:** the file is 76.6 MiB. Discord's upload limit without Nitro is 10 MB, so post it
+**Sharing on Discord:** the file is 76.5 MiB. Discord's upload limit without Nitro is 10 MB, so post it
 with Nitro (which allows larger uploads) or share a link from a file host. The engine alone is
 37 MB compressed, so a working build can't get under 10 MB.
 
@@ -108,6 +117,22 @@ with Nitro (which allows larger uploads) or share a link from a file host. The e
 
 `./build.sh pack` alone re-packs. `FIREFOX_WASM_REF=<commit>` builds another upstream version; if the
 patches no longer apply to it, the build stops and says which one.
+
+### Page-only changes (no engine build)
+
+Changes to the page in `resources/src` don't need the engine build: the packer can reuse the engine
+inside an existing `firefox.html`. Its four engine assets are copied byte for byte and checked against
+its SHA-256 manifest. This takes about a minute and needs only git and Node.js 18+ (on Windows, run it
+in WSL):
+
+```bash
+./build.sh clone
+(cd resources && npm install)
+node resources/pack.mjs --engine-from firefox.html
+```
+
+`clone` fetches firefox-wasm itself (small, not the Gecko source) for the loader source. Changes to
+`resources/patches` or `resources/coop-glue.mjs` still need the full build.
 
 ### Windows (PowerShell)
 
@@ -143,6 +168,9 @@ The page side is in `resources/`:
 - `coop-glue.mjs`: pack-time edits to the emscripten glue, each an exact match that stops the pack if
   emscripten's output changes.
 - `coop-loader.mjs`: the repaint backoff in upstream's loader.
+- `resolution-loader.mjs`: input for the Resolution option in upstream's loader: mouse positions in
+  CSS pixels, wheel deltas in device pixels, and presses while a menu is open (above a pixel ratio of
+  1 the engine's own "click outside a popup" test mixes the two, so the page does that test).
 
 ### What the build does (phases 1 to 4)
 

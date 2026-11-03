@@ -102,6 +102,17 @@ details.options summary::-webkit-details-marker { display: none; }
 .opt-grid small { display: block; color: var(--muted); }
 .opt-grid .field span { display: block; font-weight: 600; }
 .opt-grid input[type="text"] { width: 100%; margin-top: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: 13px ui-monospace, "Cascadia Code", Consolas, monospace; }
+.opt-grid input[type="range"] { width: 100%; margin: 10px 0 6px; accent-color: var(--accent); }
+.opt-grid input[type="range"]:disabled { opacity: .45; }
+.res-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 12px; }
+#res-value { font-size: 14px; font-variant-numeric: tabular-nums; }
+#res-value b { font-weight: 650; }
+#res-value em { font-style: normal; color: var(--warn); }
+.res-actions { display: flex; gap: 8px; }
+.res-actions button { padding: 6px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: 600 13px system-ui, sans-serif; cursor: pointer; }
+.res-actions #res-apply { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.res-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.opt-grid small.forced { color: var(--warn); margin-top: 2px; }
 
 #launch { display: inline-flex; gap: 10px; align-items: center; justify-content: center; padding: 12px 22px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font: 600 15px system-ui, sans-serif; cursor: pointer; align-self: flex-start; }
 #launch:disabled { opacity: .45; cursor: not-allowed; }
@@ -119,6 +130,10 @@ footer details pre { max-height: 260px; overflow: auto; background: var(--code);
 
 #screen { display: none; position: fixed; inset: 0; width: 100vw; height: 100vh; border: 0; outline: none; background: #fff; image-rendering: pixelated; }
 #screen.ready { display: block; }
+/* Resolution (Options): more engine pixels than the screen has are shrunk smoothly. GPU mode's
+   loader sizes its surfaces to the engine's pixels; at another resolution they still fill the page. */
+#screen.smooth { image-rendering: auto; }
+body.res-scaled #screen, body.res-scaled #popup-overlay, body.res-scaled [data-libxul-glwrap] { width: 100vw !important; height: 100vh !important; }
 </style>
 </head>
 <body data-phase="checking">
@@ -157,7 +172,20 @@ footer details pre { max-height: 260px; overflow: auto; background: var(--code);
       <details class="options">
         <summary><svg class="i" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>Options</summary>
         <div class="opt-grid">
-          <label class="toggle"><input type="checkbox" id="opt-gpu"><span><b>GPU acceleration</b><small>WebRender through your browser's WebGL2: smoother scrolling and animation. Off by default because in testing it drew &lt;canvas&gt; content on web pages with red and blue swapped (images, text and CSS were correct).</small></span></label>
+          <div class="field">
+            <span>Resolution</span>
+            <small>How many pixels Firefox is drawn with. Everything stays the same size; text, images and edges get sharper. The step that matches your screen is the sharpest it gets; higher steps smooth edges a little more but take longer to draw. Above Current, GPU acceleration turns on, since it is what draws the extra pixels.</small>
+            <input type="range" id="opt-res" min="0" max="0" step="1" value="0" list="res-stops" aria-label="Resolution" aria-describedby="res-value">
+            <datalist id="res-stops"></datalist>
+            <div class="res-row">
+              <output id="res-value" for="opt-res" aria-live="polite"></output>
+              <div class="res-actions">
+                <button type="button" id="res-cancel" disabled>Cancel</button>
+                <button type="button" id="res-apply" disabled>Apply</button>
+              </div>
+            </div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="opt-gpu"><span><b>GPU acceleration</b><small>WebRender through your browser's WebGL2: smoother scrolling and animation. Off by default because in testing it drew &lt;canvas&gt; content on web pages with red and blue swapped (images, text and CSS were correct).</small><small id="gpu-forced" class="forced" hidden>On because Resolution is above Current.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-quiet"><span><b>Block Firefox's background calls to Mozilla</b><small>Like desktop Firefox, the engine contacts Remote Settings and a region service on its own. On by default: these Firefox prefs keep it local. Sites you open are unaffected.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-jit"><span><b>Experimental JS to WASM JIT</b><small>Upstream marks it unusable on many sites. Off by default.</small></span></label>
           <label class="field"><span>WISP server</span><small>WebSocket relay that Gecko's network stack (Necko) tunnels TCP through. Browsers cannot open raw sockets, so websites load through this relay. HTTPS stays encrypted end to end (Gecko does the encryption); plain HTTP pages are visible to the relay. Change it to use another relay, or clear it to load only local pages.</small><input type="text" id="opt-wisp" spellcheck="false" autocomplete="off"></label>
