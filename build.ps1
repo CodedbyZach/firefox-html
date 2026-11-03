@@ -10,7 +10,8 @@
     powershell -ExecutionPolicy Bypass -File .\build.ps1 pack     re-pack firefox.html from an existing build
 
   Stages: all, deps, clone, engine, pack.
-  -WispUrl wss://relay.example.com/  bakes a default WISP relay (for websites) into firefox.html.
+  -WispUrl wss://relay.example.com/  bakes another default WISP relay (for websites) into
+                                     firefox.html. Without it the default is wss://zakaon.top/api/.
 #>
 [CmdletBinding()]
 param(

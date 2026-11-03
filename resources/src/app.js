@@ -299,46 +299,12 @@ async function runChecks() {
   }
 }
 
-// Opt-in only: the public WISP proxy the upstream chrome-demo uses (its discovery URL comes
-// from firefox-wasm/demo/chrome/src/main.ts). Never contacted unless the user clicks.
-const PUBLIC_WISP_DISCOVERY = 'https://sensible-ship-8305.puter.work/';
-
 // ws(s):// with the trailing slash wisp-js needs; http(s):// becomes ws(s)://.
 function normalizeWispUrl(u) {
   u = String(u || '').trim();
   if (!u) return '';
   u = u.replace(/^http(s?):\/\//i, 'ws$1://');
   return u.endsWith('/') ? u : u + '/';
-}
-
-// The upstream demo uses the discovery reply as-is as its WISP address. Accept the
-// shapes that can take: a bare or quoted URL, or JSON with a URL in it.
-function wispUrlFromAnswer(text) {
-  let t = String(text).trim();
-  try {
-    const j = JSON.parse(t);
-    if (typeof j === 'string') t = j;
-    else if (j && typeof j === 'object') t = Object.values(j).filter((v) => typeof v === 'string').join(' ');
-  } catch {}
-  const m = /\b(?:wss?|https?):\/\/[^\s"'<>]+/i.exec(t);
-  return m ? normalizeWispUrl(m[0]) : null;
-}
-
-async function usePublicWisp() {
-  const ok = confirm("Use Puter's public WISP proxy?\n\nWebsites you open in this Firefox will connect through Puter's server. " +
-    'HTTPS stays encrypted end to end (Gecko does the encryption); plain HTTP pages are visible to the proxy.');
-  if (!ok) return;
-  setCheck('wisp', 'pending', 'Fetching the public proxy address');
-  try {
-    const r = await fetch(PUBLIC_WISP_DISCOVERY, { cache: 'no-store' });
-    const text = await r.text();
-    const url = r.ok ? wispUrlFromAnswer(text) : null;
-    if (!url) throw new Error(`no address in the answer (HTTP ${r.status}): "${text.trim().slice(0, 100)}"`);
-    optWisp.value = url;
-    await refreshWisp();
-  } catch (e) {
-    setCheck('wisp', 'warn', `Could not get the public proxy address: ${e.message}`);
-  }
 }
 
 async function refreshWisp() {
@@ -351,7 +317,8 @@ async function refreshWisp() {
 
 async function main() {
   const saved = loadOpts();
-  optWisp.value = saved.wisp ?? defaultWispUrl();
+  // An empty saved value (e.g. from a build without a default relay) falls back to the default.
+  optWisp.value = saved.wisp || defaultWispUrl();
   optStart.value = saved.start ?? '';
   optJit.checked = saved.jit ?? false;
   optQuiet.checked = saved.quiet ?? true;
@@ -362,7 +329,6 @@ async function main() {
   // Off by default: in testing, GPU mode drew <canvas> content with red and blue swapped.
   optGpu.checked = env.webgl2 && (saved.gpu ?? false);
   optGpu.disabled = !env.webgl2;
-  $('use-public-wisp').onclick = () => void usePublicWisp();
   if ((env.threads.ok || env.coop) && env.jspi) {
     void refreshWisp();
     let wispTimer;
@@ -392,7 +358,7 @@ async function main() {
 async function launch() {
   launchBtn.disabled = true;
   launchBtn.querySelector('span').textContent = 'Starting Firefox';
-  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet, $('use-public-wisp')]) el.disabled = true;
+  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet]) el.disabled = true;
   setPhase('booting');
   const opts = { gpu: optGpu.checked, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked };
   saveOpts(opts);

@@ -14,8 +14,8 @@
 #                         make web, make chrome-assets
 #   ./build.sh pack       resources/pack.mjs -> firefox.html
 #
-# Environment: REPO (existing firefox-wasm checkout), FIREFOX_WASM_REF, and WISP_URL (optional
-# default WISP relay baked into firefox.html, e.g. wss://relay.example.com/).
+# Environment: REPO (existing firefox-wasm checkout), FIREFOX_WASM_REF, and WISP_URL (the default
+# WISP relay baked into firefox.html; wss://zakaon.top/api/ when unset, WISP_URL= for none).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

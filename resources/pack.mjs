@@ -2,7 +2,8 @@
 // Packs a finished firefox-wasm build into ONE self-contained firefox.html.
 //
 //   node resources/pack.mjs --repo /path/to/firefox-wasm [--out firefox.html]
-//   WISP_URL=wss://relay.example/ bakes in the default WISP relay for websites (optional).
+//   The default WISP relay for websites is wss://zakaon.top/api/ (shown under Options);
+//   WISP_URL=wss://relay.example/ bakes in another one, WISP_URL= (empty) none.
 //   (build.sh / build.ps1 run this as their "pack" stage)
 //
 // Inputs (all produced by the upstream build, nothing is downloaded):
@@ -24,6 +25,7 @@ import { patchGlueForCoop } from './coop-glue.mjs';
 import { patchLoaderForCoop } from './coop-loader.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+const DEFAULT_WISP_URL = 'wss://zakaon.top/api/';
 const argv = process.argv.slice(2);
 const arg = (name, def) => {
   const i = argv.indexOf(`--${name}`);
@@ -125,7 +127,7 @@ const manifest = {
       ? fs.readFileSync(path.join(REPO, 'firefox/browser/config/version.txt'), 'utf8').trim() : 'unknown',
     emscripten: fs.existsSync(emVersionFile) ? fs.readFileSync(emVersionFile, 'utf8').trim().replace(/"/g, '') : 'unknown',
     date: new Date().toISOString().slice(0, 10),
-    defaultWisp: process.env.WISP_URL || '',
+    defaultWisp: process.env.WISP_URL ?? DEFAULT_WISP_URL,
   },
 };
 

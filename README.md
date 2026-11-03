@@ -71,18 +71,18 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
 - From `file://` the profile lives in memory (browser storage for files is limited), so cookies and
   history are gone after a reload. Served over http(s), the profile is stored in OPFS.
 - File pickers, Save As and playback-speed changes are stubbed out in this engine build.
-- Websites need a WISP relay, because a page can't open network connections itself. TLS still happens
-  inside Gecko. Nothing remote is used by default: enter a relay under Options, use the opt-in button
-  for the official demo's public relay, or bake one in with `WISP_URL=wss://relay/ ./build.sh pack`.
-  The button accepts the relay address as plain text, quoted, or in JSON, as `ws(s)://` or
-  `http(s)://`. If it finds no address, it quotes the start of the answer.
+- Websites load through a WISP relay, because a page can't open network connections itself. The
+  default is `wss://zakaon.top/api/`, shown under Options > WISP server, where it can be changed (or
+  cleared for local pages only). The page checks the relay when it opens. TLS still happens inside
+  Gecko, so HTTPS stays encrypted end to end; plain HTTP pages are visible to the relay.
 
 **Not tested:**
 
 - Firefox or Safari as the host browser. Only Chromium is available on the build machine. The page
   needs WebAssembly JSPI and says so if the browser lacks it; Chrome and Edge have it from version 137.
-- The real public relay behind the Options button: the build machine can't reach it. The button was
-  tested against a stand-in answer pointing at a local relay, and Firefox then loaded a site through it.
+- The default relay `wss://zakaon.top/api/`: the build machine's network can't reach it. The same path
+  was tested with a relay on the build machine, which Firefox loaded a site through. A relay has to
+  accept pages opened as files (they connect with `Origin: null`).
 - Real websites (the build machine's network blocks them).
 - Audio and video.
 - `build.ps1` on real Windows. It was run under PowerShell 7 with a simulated WSL.

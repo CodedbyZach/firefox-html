@@ -89,8 +89,6 @@ body[data-blocked="1"] .blocked { display: block; }
 .doc h3 { margin: 16px 0 4px; font-size: 14px; }
 .doc p, .doc li { margin: 4px 0; }
 .doc ul { margin: 4px 0; padding-left: 20px; }
-.public-wisp button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: 600 13px system-ui, sans-serif; cursor: pointer; }
-.public-wisp small { margin-top: 6px; }
 .progress-track { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
 #progress-fill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
 .progress-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 13px; }
@@ -162,8 +160,7 @@ footer details pre { max-height: 260px; overflow: auto; background: var(--code);
           <label class="toggle"><input type="checkbox" id="opt-gpu"><span><b>GPU acceleration</b><small>WebRender through your browser's WebGL2: smoother scrolling and animation. Off by default because in testing it drew &lt;canvas&gt; content on web pages with red and blue swapped (images, text and CSS were correct).</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-quiet"><span><b>Block Firefox's background calls to Mozilla</b><small>Like desktop Firefox, the engine contacts Remote Settings and a region service on its own. On by default: these Firefox prefs keep it local. Sites you open are unaffected.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-jit"><span><b>Experimental JS to WASM JIT</b><small>Upstream marks it unusable on many sites. Off by default.</small></span></label>
-          <label class="field"><span>WISP server</span><small>WebSocket proxy that Gecko's network stack (Necko) tunnels TCP through. Browsers cannot open raw sockets, so http(s) sites need one. Enter a relay address here for websites to load. Nothing remote is used unless you enter one or click the button below.</small><input type="text" id="opt-wisp" spellcheck="false" autocomplete="off"></label>
-          <div class="field public-wisp"><button type="button" id="use-public-wisp">Use the official demo's public proxy (Puter)</button><small>Opt-in. Fetches the proxy address the upstream demo uses from <code>sensible-ship-8305.puter.work</code> and fills it in above. Your browsing then goes through Puter's server (HTTPS stays encrypted end to end). Not tested by this build.</small></div>
+          <label class="field"><span>WISP server</span><small>WebSocket relay that Gecko's network stack (Necko) tunnels TCP through. Browsers cannot open raw sockets, so websites load through this relay. HTTPS stays encrypted end to end (Gecko does the encryption); plain HTTP pages are visible to the relay. Change it to use another relay, or clear it to load only local pages.</small><input type="text" id="opt-wisp" spellcheck="false" autocomplete="off"></label>
           <label class="field"><span>Open after launch</span><small>Optional URL for the first tab, for example <code>about:mozilla</code> or <code>https://example.com/</code>.</small><input type="text" id="opt-start" spellcheck="false" autocomplete="off" placeholder="(Firefox default)"></label>
         </div>
       </details>
