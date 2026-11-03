@@ -1,0 +1,669 @@
+diff --git a/gecko.js/build-lib.sh b/gecko.js/build-lib.sh
+index 4177e3b..e19303e 100644
+--- a/gecko.js/build-lib.sh
++++ b/gecko.js/build-lib.sh
+@@ -60,6 +60,25 @@ for src in embed-xul embed-init embed-browser embed-paint embed-input embed-mirr
+   EMBED_OBJS+=( "$BUILD/$src.o" )
+ done
+ 
++# Cooperative single-agent pthreads (src/coop-threads.c + lib/coop-threads.js): when
++# the page cannot share memory with Workers (no cross-origin isolation, e.g. opened
++# from a file), every pthread runs on the page thread and blocking waits suspend via
++# JSPI. coop-threads.o overrides emscripten's futex wait/wake and sched_yield (same
++# behaviour otherwise); coop-sjlj.o provides wasm-native invoke_* / longjmp so no JS
++# frame sits inside setjmp regions.
++EMROOT="${EMSDK:+$EMSDK/upstream/emscripten}"
++EMROOT="${EMROOT:-$(dirname "$(command -v em++)")}"
++EMCC="$EMROOT/emcc"
++NM="$EMROOT/../bin/llvm-nm"
++COOP_INC=()
++for d in libc/musl/arch/emscripten libc/musl/arch/generic libc/musl/src/internal \
++         libc/musl/src/include libc/musl/include libc pthread; do
++  COOP_INC+=( -I"$EMROOT/system/lib/$d" )
++done
++echo ">> compiling coop-threads.c"
++"$EMCC" -std=c99 -D_XOPEN_SOURCE=700 -pthread -O2 -Wno-unused-result "${COOP_INC[@]}" \
++  -c "$SRC/coop-threads.c" -o "$BUILD/coop-threads.o" || exit 1
++
+ # mozglue/memory/mfbt/fmt are MOZ_GLUE_IN_PROGRAM: linked into the program, not libxul.
+ LOOSE=()
+ for d in mfbt mozglue/misc mozglue/baseprofiler mozglue/build memory/build memory/mozalloc third_party/fmt; do
+@@ -67,6 +86,14 @@ for d in mfbt mozglue/misc mozglue/baseprofiler mozglue/build memory/build memor
+ done
+ EXTRA=( "$BUILD/libnss3.stripped.so" "$BUILD/libgkcodecs.stripped.so" )
+ 
++echo ">> generating wasm-native setjmp/longjmp wrappers (coop-sjlj.S)"
++INVOKES=$(for f in "${EMBED_OBJS[@]}" "$BUILD/libxul.o" "${LOOSE[@]}" "${EXTRA[@]}"; do
++  "$NM" -u "$f" 2>/dev/null; done | awk '{print $NF}' | grep '^invoke_' | sort -u)
++# shellcheck disable=SC2086 -- one symbol per word
++python3 "$HERE/gen-coop-sjlj.py" "$BUILD/coop-sjlj.S" $INVOKES || exit 1
++"$EMCC" -pthread -mexception-handling -c "$BUILD/coop-sjlj.S" -o "$BUILD/coop-sjlj.o" || exit 1
++EXTRA+=( "$BUILD/coop-threads.o" "$BUILD/coop-sjlj.o" )
++
+ EMSETTINGS=(
+   "$LINK_OPT" --profiling-funcs
+   # Keep the JS glue UNMINIFIED even in release. The post-link patches in
+@@ -108,6 +135,8 @@ EMSETTINGS=(
+   # pervasive JS frames (xptcall trampoline, DOM bindings). Scoping JSPI to this one
+   # import keeps everything else on its original non-suspending block model.
+   --js-library "$LIB/gl-present.js"
++  # Cooperative single-agent pthread imports (see coop-threads.o above).
++  --js-library "$LIB/coop-threads.js"
+   # Coarse monotonic clock writer (on by default; GECKO_COARSE_CLOCK=0 disables): refreshes the
+   # embedder's shared-heap clock word so TimeStamp/NSPR low-res reads skip the per-call
+   # wasm->JS performance.now() crossing. See gecko.js/src/embed-xul.cpp.
+diff --git a/gecko.js/gen-coop-sjlj.py b/gecko.js/gen-coop-sjlj.py
+new file mode 100644
+index 0000000..4876679
+--- /dev/null
++++ b/gecko.js/gen-coop-sjlj.py
+@@ -0,0 +1,80 @@
++#!/usr/bin/env python3
++# Emit wasm-native versions of emscripten's setjmp/longjmp support:
++# invoke_<sig> wrappers and _emscripten_throw_longjmp, using a wasm exception
++# tag instead of JS try/catch. Defined in the module, they replace the JS
++# imports, so no JS frame sits between a setjmp caller and its callees and
++# those callees may suspend (JSPI). Same semantics as the JS versions: restore
++# the stack pointer and setThrew(1, 0) when a longjmp unwinds through.
++#
++#   gen-coop-sjlj.py OUT.S invoke_vii invoke_iiij ...
++import sys
++
++TYPES = {"i": "i32", "p": "i32", "j": "i64", "f": "f32", "d": "f64"}
++ZERO = {"i32": "i32.const\t0", "i64": "i64.const\t0", "f32": "f32.const\t0", "f64": "f64.const\t0"}
++
++
++def wrapper(name):
++    sig = name[len("invoke_"):]
++    ret = None if sig[0] == "v" else TYPES[sig[0]]
++    params = [TYPES[c] for c in sig[1:]]
++    nparams = len(params) + 1
++    out = [
++        "\t.globl\t%s" % name,
++        "\t.type\t%s,@function" % name,
++        "%s:" % name,
++        "\t.functype\t%s (%s) -> (%s)" % (name, ", ".join(["i32"] + params), ret or ""),
++        "\t.local\ti32",
++        "\tglobal.get\t__stack_pointer",
++        "\tlocal.set\t%d" % nparams,
++        "\ttry\t%s" % (ret or ""),
++    ]
++    out += ["\tlocal.get\t%d" % (i + 1) for i in range(len(params))]
++    out += [
++        "\tlocal.get\t0",
++        "\tcall_indirect\t(%s) -> (%s)" % (", ".join(params), ret or ""),
++        "\tcatch\t__coop_sjlj",
++        "\tdrop",
++        "\tlocal.get\t%d" % nparams,
++        "\tglobal.set\t__stack_pointer",
++        "\ti32.const\t1",
++        "\ti32.const\t0",
++        "\tcall\tsetThrew",
++    ]
++    if ret:
++        out.append("\t" + ZERO[ret])
++    out += ["\tend_try", "\tend_function", ""]
++    return "\n".join(out)
++
++
++def main():
++    out_path = sys.argv[1]
++    names = sorted(set(n for n in sys.argv[2:] if n.startswith("invoke_")))
++    for n in names:
++        if not n[len("invoke_"):] or any(c not in TYPES and c != "v" for c in n[len("invoke_"):]) or "v" in n[len("invoke_") + 1:]:
++            sys.exit("gen-coop-sjlj: unsupported signature %s" % n)
++    parts = [
++        "\t.globaltype\t__stack_pointer, i32",
++        "\t.functype\tsetThrew (i32, i32) -> ()",
++        "\t.hidden\t__coop_sjlj",
++        "\t.globl\t__coop_sjlj",
++        "\t.tagtype\t__coop_sjlj i32",
++        "__coop_sjlj:",
++        "",
++        "\t.text",
++        "\t.globl\t_emscripten_throw_longjmp",
++        "\t.type\t_emscripten_throw_longjmp,@function",
++        "_emscripten_throw_longjmp:",
++        "\t.functype\t_emscripten_throw_longjmp () -> ()",
++        "\ti32.const\t0",
++        "\tthrow\t__coop_sjlj",
++        "\tend_function",
++        "",
++    ]
++    parts += [wrapper(n) for n in names]
++    with open(out_path, "w") as f:
++        f.write("\n".join(parts))
++    print("gen-coop-sjlj: %d invoke wrappers -> %s" % (len(names), out_path))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/gecko.js/lib/coop-threads.js b/gecko.js/lib/coop-threads.js
+new file mode 100644
+index 0000000..e1d6912
+--- /dev/null
++++ b/gecko.js/lib/coop-threads.js
+@@ -0,0 +1,32 @@
++// Imports for src/coop-threads.c: cooperative single-agent pthreads.
++//
++// When the page cannot be cross-origin isolated (opened from a file, say), it
++// cannot postMessage the shared heap to Workers. The page's coop runtime
++// (globalThis.__geckoCoop) then hosts every pthread on the page thread, each
++// in its own instance of the module over the same memory, and switches
++// between them with JSPI. Blocking waits become suspensions here.
++// _emscripten_coop_wait and _emscripten_coop_yield are wrapped in
++// WebAssembly.Suspending by the glue post-link patch.
++//
++// coopCtx.depth counts JS->wasm calls in progress on this thread (exports
++// and table calls made from JS). A thread can suspend only from its promising
++// entry with no such call on the stack; JSPI cannot suspend through JS frames.
++
++addToLibrary({
++  $coopCtx: { depth: 0 },
++
++  _emscripten_coop_mode: () => (typeof __geckoCoop != 'undefined' && __geckoCoop.active) ? 1 : 0,
++
++  _emscripten_coop_can_suspend__deps: ['$coopCtx'],
++  _emscripten_coop_can_suspend: () => (ENVIRONMENT_IS_PTHREAD && coopCtx.depth === 0) ? 1 : 0,
++
++  _emscripten_coop_wait: (addr, val, maxWaitMs) => __geckoCoop.wait(addr >>> 0, val | 0, maxWaitMs),
++
++  _emscripten_coop_wake: (addr, count) => __geckoCoop.wake(addr >>> 0, count),
++
++  _emscripten_coop_yield: () => __geckoCoop.yieldNow(),
++
++  _emscripten_coop_deadlock: (addr, val, maxWaitMs) => {
++    __geckoCoop.deadlock(addr >>> 0, val | 0, maxWaitMs, ENVIRONMENT_IS_PTHREAD ? workerID : 0);
++  },
++});
+diff --git a/gecko.js/src/coop-threads.c b/gecko.js/src/coop-threads.c
+new file mode 100644
+index 0000000..911710d
+--- /dev/null
++++ b/gecko.js/src/coop-threads.c
+@@ -0,0 +1,367 @@
++/* Cooperative single-agent pthreads for emscripten 6.0.1.
++ *
++ * Linked ahead of libc, these replace emscripten_futex_wait/_wake,
++ * _emscripten_thread_notify, sched_yield, musl's __timedwait and clock_gettime.
++ * When the page runs every pthread
++ * on its own thread (coop-threads.js: no Workers, so nothing shared is ever
++ * posted and no cross-origin isolation is needed), a thread that has to block
++ * suspends through JSPI instead of executing memory.atomic.wait32, which the
++ * page thread may not do. Without that mode the code below is emscripten's.
++ */
++
++#include "atomic.h"
++#include "pthread_impl.h"
++#include "threading_internal.h"
++
++#include <emscripten/console.h>
++#include <emscripten/emscripten.h>
++#include <emscripten/threading.h>
++
++#include <assert.h>
++#include <errno.h>
++#include <limits.h>
++#include <math.h>
++#include <stdatomic.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <time.h>
++#include <wasi/api.h>
++
++/* JS (coop-threads.js). coop_wait and coop_yield are WebAssembly.Suspending. */
++int _emscripten_coop_mode(void);
++int _emscripten_coop_can_suspend(void);
++int _emscripten_coop_wait(volatile void* addr, uint32_t val, double max_wait_ms);
++int _emscripten_coop_wake(volatile void* addr, int count);
++void _emscripten_coop_yield(void);
++void _emscripten_coop_deadlock(volatile void* addr, uint32_t val, double max_wait_ms);
++
++static int coop_mode = -1;
++
++static inline bool coop(void) {
++  if (coop_mode < 0) {
++    coop_mode = _emscripten_coop_mode();
++  }
++  return coop_mode;
++}
++
++int emscripten_coop_active(void) {
++  return coop();
++}
++
++/* Cooperative threads are only switched when one blocks, so a thread that keeps
++ * finding work (or polls for something another thread must do) would hold the
++ * page forever. Reading the clock after running longer than one slice yields, the
++ * way a preemptive scheduler would switch it out. */
++#define COOP_SLICE_MS 20.0
++static _Thread_local double coop_resumed_ms = 0;
++
++static void coop_suspend_yield(void) {
++  _emscripten_coop_yield();
++  coop_resumed_ms = emscripten_get_now();
++}
++
++static void coop_maybe_preempt(double now_ms) {
++  if (now_ms - coop_resumed_ms < COOP_SLICE_MS) {
++    return;
++  }
++  coop_resumed_ms = now_ms;
++  if (_emscripten_coop_can_suspend()) {
++    coop_suspend_yield();
++  }
++}
++
++weak long __cancel(void);
++
++void* _emscripten_main_thread_futex;
++
++static int futex_wait_main_browser_thread(volatile void* addr,
++                                          uint32_t val,
++                                          double timeout,
++                                          bool cancelable) {
++  assert(emscripten_is_main_browser_thread());
++
++  double now = emscripten_get_now();
++  double end = now + timeout;
++
++  void* last_addr = a_cas_p(&_emscripten_main_thread_futex, 0, (void*)addr);
++  assert(last_addr == 0);
++
++  while (1) {
++    if (cancelable && __pthread_self()->cancel) {
++      return __cancel();
++    }
++    now = emscripten_get_now();
++    if (now > end) {
++      last_addr = a_cas_p(&_emscripten_main_thread_futex, (void*)addr, 0);
++      assert(last_addr == addr || last_addr == 0);
++      return -ETIMEDOUT;
++    }
++    last_addr = a_cas_p(&_emscripten_main_thread_futex, (void*)addr, 0);
++    assert(last_addr == addr || last_addr == 0);
++    if (last_addr == 0) {
++      break;
++    }
++    bool timer_fired = _emscripten_yield(now);
++    if (timer_fired) {
++      return -EINTR;
++    }
++    if (atomic_load((_Atomic uint32_t*)addr) != val) {
++      return -EWOULDBLOCK;
++    }
++    last_addr = a_cas_p(&_emscripten_main_thread_futex, 0, (void*)addr);
++    assert(last_addr == 0);
++  }
++  return 0;
++}
++
++static double dummy() {
++  return INFINITY;
++}
++
++weak_alias(dummy, _emscripten_next_timer);
++
++/* A thread that cannot suspend right now (the page thread itself, or wasm
++ * re-entered from JavaScript) and would really block: nothing else can run
++ * until it returns, so the value can never change. */
++static int coop_wait_unsuspendable(volatile void* addr, uint32_t val,
++                                   double max_wait_ms) {
++  if (atomic_load((_Atomic uint32_t*)addr) != val) {
++    return -EWOULDBLOCK;
++  }
++  if (max_wait_ms != INFINITY) {
++    return -ETIMEDOUT;
++  }
++  _emscripten_coop_deadlock(addr, val, max_wait_ms);
++  return -EWOULDBLOCK;
++}
++
++static int coop_futex_wait(volatile void* addr, uint32_t val,
++                           double max_wait_ms, bool cancelable) {
++  pthread_t self = __pthread_self();
++  if (!_emscripten_coop_can_suspend()) {
++    return coop_wait_unsuspendable(addr, val, max_wait_ms);
++  }
++  int r = 0;
++  uintptr_t expected_null = 0;
++  if (atomic_compare_exchange_strong(&self->wait_addr, &expected_null,
++                                     (uintptr_t)addr)) {
++    r = _emscripten_coop_wait(addr, val, max_wait_ms);
++    coop_resumed_ms = emscripten_get_now();
++  }
++  bool notified = atomic_exchange(&self->wait_addr, 0) & NOTIFY_BIT;
++  if (self->cancel && cancelable) {
++    return __cancel();
++  }
++  bool timer_fired = _emscripten_yield(0);
++  if (notified || timer_fired) {
++    return -EINTR;
++  }
++  if (r == 1) {
++    return -EWOULDBLOCK;
++  }
++  if (r == 2) {
++    return -ETIMEDOUT;
++  }
++  return 0;
++}
++
++static int _do_futex_wait(volatile void* addr, uint32_t val,
++                          double max_wait_ms) {
++  if ((((intptr_t)addr) & 3) != 0) {
++    return -EINVAL;
++  }
++
++  int ret;
++
++  pthread_t self = __pthread_self();
++  bool cancelable = __cancel && self->canceldisable != PTHREAD_CANCEL_DISABLE;
++
++  if (coop()) {
++    return coop_futex_wait(addr, val, max_wait_ms, cancelable);
++  }
++
++  if (!_emscripten_thread_supports_atomics_wait()) {
++    return futex_wait_main_browser_thread(addr, val, max_wait_ms, cancelable);
++  }
++
++  bool is_runtime_thread = emscripten_is_main_runtime_thread();
++  if (is_runtime_thread) {
++    max_wait_ms = fmin(max_wait_ms, fmax(0, _emscripten_next_timer()));
++  }
++
++  int64_t max_wait_ns = ATOMICS_WAIT_DURATION_INFINITE;
++  if (max_wait_ms != INFINITY) {
++    max_wait_ns = (int64_t)(max_wait_ms * 1e6);
++  }
++  uintptr_t expected_null = 0;
++  if (atomic_compare_exchange_strong(&self->wait_addr, &expected_null,
++                                     (uintptr_t)addr)) {
++    ret = __builtin_wasm_memory_atomic_wait32((int*)addr, val, max_wait_ns);
++  } else {
++    assert(expected_null & NOTIFY_BIT);
++    ret = ATOMICS_WAIT_OK;
++  }
++
++  bool notified = atomic_exchange(&self->wait_addr, 0) & NOTIFY_BIT;
++
++  if (self->cancel && cancelable) {
++    return __cancel();
++  }
++
++  bool timer_fired = _emscripten_yield(0);
++  if (notified || timer_fired) {
++    return -EINTR;
++  }
++
++  if (ret == ATOMICS_WAIT_NOT_EQUAL) {
++    return -EWOULDBLOCK;
++  }
++  if (ret == ATOMICS_WAIT_TIMED_OUT) {
++    return -ETIMEDOUT;
++  }
++  assert(ret == ATOMICS_WAIT_OK);
++  return 0;
++}
++
++int emscripten_futex_wait(volatile void* addr, uint32_t val,
++                          double max_wait_ms) {
++  emscripten_conditional_set_current_thread_status(EM_THREAD_STATUS_RUNNING,
++                                                   EM_THREAD_STATUS_WAITFUTEX);
++  int ret = _do_futex_wait(addr, val, max_wait_ms);
++  emscripten_conditional_set_current_thread_status(EM_THREAD_STATUS_WAITFUTEX,
++                                                   EM_THREAD_STATUS_RUNNING);
++  return ret;
++}
++
++int emscripten_futex_wake(volatile void* addr, int count) {
++  if (!addr || (((intptr_t)addr) & 3) != 0 || count < 0) {
++    return -EINVAL;
++  }
++  if (count == 0) {
++    return 0;
++  }
++
++  int coop_woken = 0;
++  if (coop()) {
++    coop_woken = _emscripten_coop_wake(addr, count);
++    if (count != INT_MAX) {
++      count -= coop_woken;
++      if (count <= 0) {
++        return coop_woken;
++      }
++    }
++  }
++
++  int main_thread_woken = 0;
++  if (a_cas_p(&_emscripten_main_thread_futex, (void*)addr, 0) == addr) {
++    assert(!emscripten_is_main_browser_thread());
++    if (count != INT_MAX) {
++      --count;
++      main_thread_woken = 1;
++      if (count <= 0) {
++        return coop_woken + 1;
++      }
++    }
++  }
++
++  int ret = __builtin_wasm_memory_atomic_notify((int*)addr, count);
++  assert(ret >= 0);
++  return ret + main_thread_woken + coop_woken;
++}
++
++void _emscripten_thread_notify(pthread_t target) {
++  uintptr_t wait_addr = atomic_fetch_or(&target->wait_addr, NOTIFY_BIT);
++  if (wait_addr == 0 || (wait_addr & NOTIFY_BIT)) {
++    return;
++  }
++  if (coop()) {
++    /* The target is parked in _emscripten_coop_wait; it clears wait_addr only
++     * once it runs again, which cannot happen while this thread spins. */
++    emscripten_futex_wake((void*)wait_addr, INT_MAX);
++    return;
++  }
++  while (target->wait_addr == (wait_addr | NOTIFY_BIT)) {
++    emscripten_futex_wake((void*)wait_addr, INT_MAX);
++  }
++}
++
++/* musl's timed wait (emscripten 6.0.1 __timedwait.c). An absolute deadline that
++ * has already passed returns ETIMEDOUT without reaching the futex, so a thread
++ * polling a condition in a loop would never give the others a turn; in
++ * cooperative mode it yields first. */
++static volatile int eintr_dummy = 0;
++weak_alias(eintr_dummy, __eintr_valid_flag);
++
++int __timedwait_cp(volatile int* addr, int val, clockid_t clk,
++                   const struct timespec* at, int priv) {
++  int r;
++  struct timespec to, *top = 0;
++
++  if (at) {
++    if (at->tv_nsec >= 1000000000UL) return EINVAL;
++    if (__clock_gettime(clk, &to)) return EINVAL;
++    to.tv_sec = at->tv_sec - to.tv_sec;
++    if ((to.tv_nsec = at->tv_nsec - to.tv_nsec) < 0) {
++      to.tv_sec--;
++      to.tv_nsec += 1000000000;
++    }
++    if (to.tv_sec < 0) {
++      if (coop() && _emscripten_coop_can_suspend()) {
++        coop_suspend_yield();
++      }
++      return ETIMEDOUT;
++    }
++    top = &to;
++  }
++
++  double msecs_to_sleep =
++      top ? (top->tv_sec * 1000 + top->tv_nsec / 1000000.0) : INFINITY;
++  r = -emscripten_futex_wait((void*)addr, val, msecs_to_sleep);
++  if (r != EINTR && r != ETIMEDOUT && r != ECANCELED) r = 0;
++  if (r == EINTR && !__eintr_valid_flag) r = 0;
++
++  return r;
++}
++
++int __timedwait(volatile int* addr, int val, clockid_t clk,
++                const struct timespec* at, int priv) {
++  int cs, r;
++  __pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
++  emscripten_conditional_set_current_thread_status(EM_THREAD_STATUS_RUNNING,
++                                                   EM_THREAD_STATUS_WAITMUTEX);
++  r = __timedwait_cp(addr, val, clk, at, priv);
++  emscripten_conditional_set_current_thread_status(EM_THREAD_STATUS_WAITMUTEX,
++                                                   EM_THREAD_STATUS_RUNNING);
++  __pthread_setcancelstate(cs, 0);
++  return r;
++}
++
++int __clock_gettime(clockid_t clk, struct timespec* ts) {
++  __wasi_timestamp_t t;
++  if (clk > __WASI_CLOCKID_THREAD_CPUTIME_ID || clk < 0) {
++    errno = EINVAL;
++    return -1;
++  }
++  __wasi_errno_t e = __wasi_clock_time_get(clk, 1, &t);
++  if (e) {
++    errno = e;
++    return -1;
++  }
++  ts->tv_sec = t / 1000000000ull;
++  ts->tv_nsec = t % 1000000000ull;
++  if (coop_mode == 1 && clk <= __WASI_CLOCKID_MONOTONIC) {
++    coop_maybe_preempt((double)t / 1e6);
++  }
++  return 0;
++}
++
++weak_alias(__clock_gettime, clock_gettime);
++
++int sched_yield(void) {
++  if (coop() && _emscripten_coop_can_suspend()) {
++    coop_suspend_yield();
++  }
++  _emscripten_yield(emscripten_get_now());
++  return 0;
++}
+diff --git a/gecko.js/src/embed-init.cpp b/gecko.js/src/embed-init.cpp
+index f41979a..77cbcb4 100644
+--- a/gecko.js/src/embed-init.cpp
++++ b/gecko.js/src/embed-init.cpp
+@@ -58,17 +58,29 @@ NS_IMPL_ISUPPORTS(GreDirProvider, nsIDirectoryServiceProvider,
+ // which aborts tabbrowser init (gBrowser stays undefined). We pump the event loop
+ // with SpinEventLoopUntil and have no native event source, so a no-op appshell that
+ // merely satisfies the service dependency is sufficient.
++// It also wakes the engine command loop (embed-xul.cpp) whenever another thread
++// dispatches to the main thread, so that loop can sleep while idle instead of
++// polling; RunPendingGeckoEvents re-arms that notification each loop iteration.
+ class EmbedAppShell final : public nsBaseAppShell {
+  public:
+   EmbedAppShell() = default;
+   nsresult InitShell() { return Init(); }
++  void RunPendingGeckoEvents() { NativeEventCallback(); }
+ 
+  protected:
+   ~EmbedAppShell() override = default;
+-  void ScheduleNativeEventCallback() override {}
++  void ScheduleNativeEventCallback() override { embed_wake_command_loop(); }
+   bool ProcessNextNativeEvent(bool) override { return false; }
+ };
+ 
++static EmbedAppShell* gEmbedAppShell = nullptr;
++
++void embed_run_pending_gecko_events() {
++  if (gEmbedAppShell) {
++    gEmbedAppShell->RunPendingGeckoEvents();
++  }
++}
++
+ class EmbedAppShellFactory final : public nsIFactory {
+  public:
+   NS_DECL_ISUPPORTS
+@@ -288,6 +300,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int xul_init(const char* greDir) {
+       if (reg) {
+         RefPtr<EmbedAppShell> shell = new EmbedAppShell();
+         nsresult srv = shell->InitShell();
++        gEmbedAppShell = shell;
+         static NS_DEFINE_CID(kAppShellCID, NS_APPSHELL_CID);
+         RefPtr<EmbedAppShellFactory> fac = new EmbedAppShellFactory(shell);
+         nsresult rrv = reg->RegisterFactory(
+diff --git a/gecko.js/src/embed-xul.cpp b/gecko.js/src/embed-xul.cpp
+index 31b48cb..7c39f33 100644
+--- a/gecko.js/src/embed-xul.cpp
++++ b/gecko.js/src/embed-xul.cpp
+@@ -62,6 +62,17 @@ nsresult GetCurrentProcessMemoryUsage(uint64_t* aResult) {
+ 
+ // ---- IPC mailbox + env-driven render flags (shared globals defined here) ----
+ XulCmd* g_cmd = nullptr;
++
++// Set from any thread when an event is dispatched to the main thread (EmbedAppShell);
++// the command loop then runs it instead of sleeping until its next pump.
++static std::atomic<int> g_mainEventPosted{0};
++void embed_wake_command_loop() {
++  g_mainEventPosted.store(1);
++  if (g_cmd) {
++    emscripten_futex_wake((void*)&g_cmd->state, INT_MAX);
++  }
++}
++extern "C" int emscripten_coop_active(void);
+ extern "C" EMSCRIPTEN_KEEPALIVE void* xul_cmd_ptr() { return g_cmd; }
+ bool g_gpu = false;                  // GPU/WebRender present (set from env in main)
+ bool g_mirror = false;               // DOM-mirror mode (op 6-8 pull the DOM)
+@@ -128,15 +139,29 @@ int main() {
+   // posted by other threads) drain at most this often, so keep it well under a frame
+   // (4ms) to avoid stutter -- commands themselves don't wait for it (notify wakes us).
+   constexpr double kCmdPumpMs = 4.0;
++  // Single-thread mode (coop-threads.c): every engine thread shares the page thread,
++  // so idle polling is not free. Dispatches to the main thread wake this loop
++  // (embed_wake_command_loop), so when nothing runs the pump backs off to 64 ms.
++  const bool coop = emscripten_coop_active();
++  double pumpMs = kCmdPumpMs;
+   for (;;) {
+     int32_t s = g_cmd->state;
+     if (s != 1) {  // idle: pump the engine loop, then wait for a command or timeout
++      g_mainEventPosted.store(0);
++      bool hadEvents = NS_HasPendingEvents(nullptr);
++      embed_run_pending_gecko_events();  // re-arms the dispatch wakeup
+       NS_ProcessPendingEvents(nullptr, 0);  // non-blocking drain of ready runnables
+       js::wasm::WasmJitDrainDeferred();  // compile deferred hot fns off the critical path
++      if (coop) {
++        pumpMs = hadEvents ? kCmdPumpMs : std::min(pumpMs * 2, 64.0);
++        if (g_mainEventPosted.load()) {
++          continue;
++        }
++      }
+       // futex_wait returns at once if `state` already changed (no lost wakeups), so
+       // a request submitted in the race window between the read and the wait is not
+       // missed -- it's why this takes the expected value `s`.
+-      emscripten_futex_wait((void*)&g_cmd->state, (uint32_t)s, kCmdPumpMs);
++      emscripten_futex_wait((void*)&g_cmd->state, (uint32_t)s, pumpMs);
+       continue;
+     }
+     {
+diff --git a/gecko.js/src/embed-xul.h b/gecko.js/src/embed-xul.h
+index 96edd50..34db970 100644
+--- a/gecko.js/src/embed-xul.h
++++ b/gecko.js/src/embed-xul.h
+@@ -21,6 +21,9 @@
+ #include <unistd.h>
+ #include <sys/stat.h>
+ #include <pthread.h>
++#include <atomic>
++#include <algorithm>
++#include <climits>
+ #include <emscripten.h>
+ #include <emscripten/wasmfs.h>
+ 
+@@ -198,3 +201,7 @@ char* mirror_collect_images();                               // embed-mirror.cpp
+ char* mirror_collect_css();
+ char* mirror_collect_canvases();
+ void mirror_clear_caches();
++
++// Command-loop wakeup on main-thread dispatch (embed-xul.cpp / embed-init.cpp).
++void embed_wake_command_loop();
++void embed_run_pending_gecko_events();

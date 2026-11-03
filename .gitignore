@@ -1,0 +1,8 @@
+# npm install output and the packer's compression cache (regenerable)
+resources/node_modules/
+resources/build-cache/
+
+# build.sh clones and builds the engine here (about 35 GB)
+work/
+
+*.log

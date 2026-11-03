@@ -1,0 +1,341 @@
+diff --git a/xpcom/reflect/xptcall/md/unix/xptcinvoke_wasm.cpp b/xpcom/reflect/xptcall/md/unix/xptcinvoke_wasm.cpp
+index 4694e8ca6e..be5cce23e5 100644
+--- a/xpcom/reflect/xptcall/md/unix/xptcinvoke_wasm.cpp
++++ b/xpcom/reflect/xptcall/md/unix/xptcinvoke_wasm.cpp
+@@ -13,6 +13,8 @@
+ 
+ #include "xptcprivate.h"
+ 
++#include <alloca.h>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstdint>
+ #include <emscripten.h>
+@@ -41,48 +43,98 @@ EM_JS(int, WasmInvoke,
+   return f.apply(null, args);
+ });
+ 
++namespace xpt::detail::wasm {
++struct InvokeThunk {
++  uint64_t mKey;
++  nsresult (*mFn)(void*, void*, const uint64_t*);
++};
++extern const InvokeThunk sInvokeThunks[];
++extern const uint32_t sInvokeThunksSize;
++}  // namespace xpt::detail::wasm
++
++// Pure-wasm dispatch: xptdata.cpp (xptcodegen.py) emits one typed thunk per
++// XPT method signature, keyed by param count plus 2 bits per param (i/j/f/d).
++// No JS frame sits between caller and callee, so the callee may suspend (JSPI).
++static nsresult (*FindInvokeThunk(uint64_t aKey))(void*, void*, const uint64_t*) {
++  using namespace xpt::detail::wasm;
++  uint32_t lo = 0, hi = sInvokeThunksSize;
++  while (lo < hi) {
++    uint32_t mid = (lo + hi) / 2;
++    if (sInvokeThunks[mid].mKey < aKey) {
++      lo = mid + 1;
++    } else {
++      hi = mid;
++    }
++  }
++  return lo < sInvokeThunksSize && sInvokeThunks[lo].mKey == aKey
++             ? sInvokeThunks[lo].mFn
++             : nullptr;
++}
++
+ extern "C" nsresult NS_InvokeByIndex(nsISupports* that, uint32_t methodIndex,
+                                      uint32_t paramCount,
+                                      nsXPTCVariant* params) {
+   void** vtable = *reinterpret_cast<void***>(that);
+   void* fp = vtable[methodIndex];
+ 
+-  char sig[PARAM_BUFFER_COUNT + 8];
++  constexpr uint32_t kMaxThunkParams = 24;
++  uint64_t stackArgs[kMaxThunkParams + 1] = {};
++  uint64_t* args = paramCount <= kMaxThunkParams
++                       ? stackArgs
++                       : static_cast<uint64_t*>(calloc(paramCount, 8));
++  char* sig = static_cast<char*>(alloca(paramCount + 3));
+   size_t sn = 0;
+-  sig[sn++] = 'i';  // nsresult return (unused by WasmInvoke, kept for symmetry)
+-  sig[sn++] = 'i';  // this
+-  size_t bufCount = paramCount ? paramCount : 1;
+-  uint8_t* argbuf = static_cast<uint8_t*>(malloc(bufCount * 8));
++  sig[sn++] = 'i';
++  sig[sn++] = 'i';
++  uint64_t key = paramCount;
+ 
+   for (uint32_t i = 0; i < paramCount; i++) {
+     nsXPTCVariant& s = params[i];
+-    uint8_t* a = argbuf + size_t(i) * 8;
++    uint8_t* a = reinterpret_cast<uint8_t*>(&args[i]);
++    char c = 'i';
+     if (s.IsIndirect()) {
+-      sig[sn++] = 'i';
+       *reinterpret_cast<void**>(a) = &s.val;
+-      continue;
++    } else {
++      switch (s.type) {
++        case nsXPTType::T_DOUBLE: c = 'd'; *reinterpret_cast<double*>(a) = s.val.d; break;
++        case nsXPTType::T_FLOAT:  c = 'f'; *reinterpret_cast<float*>(a) = s.val.f; break;
++        case nsXPTType::T_I64:    c = 'j'; *reinterpret_cast<int64_t*>(a) = s.val.i64; break;
++        case nsXPTType::T_U64:    c = 'j'; *reinterpret_cast<uint64_t*>(a) = s.val.u64; break;
++        case nsXPTType::T_I8:     *reinterpret_cast<int32_t*>(a) = s.val.i8; break;
++        case nsXPTType::T_I16:    *reinterpret_cast<int32_t*>(a) = s.val.i16; break;
++        case nsXPTType::T_I32:    *reinterpret_cast<int32_t*>(a) = s.val.i32; break;
++        case nsXPTType::T_U8:     *reinterpret_cast<uint32_t*>(a) = s.val.u8; break;
++        case nsXPTType::T_U16:    *reinterpret_cast<uint32_t*>(a) = s.val.u16; break;
++        case nsXPTType::T_U32:    *reinterpret_cast<uint32_t*>(a) = s.val.u32; break;
++        case nsXPTType::T_BOOL:   *reinterpret_cast<uint32_t*>(a) = s.val.b ? 1 : 0; break;
++        case nsXPTType::T_CHAR:   *reinterpret_cast<int32_t*>(a) = s.val.c; break;
++        case nsXPTType::T_WCHAR:  *reinterpret_cast<uint32_t*>(a) = s.val.wc; break;
++        default:                  *reinterpret_cast<void**>(a) = s.val.p; break;
++      }
+     }
+-    switch (s.type) {
+-      case nsXPTType::T_DOUBLE: sig[sn++] = 'd'; *reinterpret_cast<double*>(a) = s.val.d; break;
+-      case nsXPTType::T_FLOAT:  sig[sn++] = 'f'; *reinterpret_cast<float*>(a) = s.val.f; break;
+-      case nsXPTType::T_I64:    sig[sn++] = 'j'; *reinterpret_cast<int64_t*>(a) = s.val.i64; break;
+-      case nsXPTType::T_U64:    sig[sn++] = 'j'; *reinterpret_cast<uint64_t*>(a) = s.val.u64; break;
+-      case nsXPTType::T_I8:     sig[sn++] = 'i'; *reinterpret_cast<int32_t*>(a) = s.val.i8; break;
+-      case nsXPTType::T_I16:    sig[sn++] = 'i'; *reinterpret_cast<int32_t*>(a) = s.val.i16; break;
+-      case nsXPTType::T_I32:    sig[sn++] = 'i'; *reinterpret_cast<int32_t*>(a) = s.val.i32; break;
+-      case nsXPTType::T_U8:     sig[sn++] = 'i'; *reinterpret_cast<uint32_t*>(a) = s.val.u8; break;
+-      case nsXPTType::T_U16:    sig[sn++] = 'i'; *reinterpret_cast<uint32_t*>(a) = s.val.u16; break;
+-      case nsXPTType::T_U32:    sig[sn++] = 'i'; *reinterpret_cast<uint32_t*>(a) = s.val.u32; break;
+-      case nsXPTType::T_BOOL:   sig[sn++] = 'i'; *reinterpret_cast<uint32_t*>(a) = s.val.b ? 1 : 0; break;
+-      case nsXPTType::T_CHAR:   sig[sn++] = 'i'; *reinterpret_cast<int32_t*>(a) = s.val.c; break;
+-      case nsXPTType::T_WCHAR:  sig[sn++] = 'i'; *reinterpret_cast<uint32_t*>(a) = s.val.wc; break;
+-      default:                  sig[sn++] = 'i'; *reinterpret_cast<void**>(a) = s.val.p; break;
++    sig[sn++] = c;
++    if (i < kMaxThunkParams) {
++      key |= uint64_t(c == 'i' ? 0 : c == 'j' ? 1 : c == 'f' ? 2 : 3) << (6 + 2 * i);
+     }
+   }
+   sig[sn] = '\0';
+ 
+-  int ret = WasmInvoke(int(intptr_t(fp)), int(intptr_t(that)), argbuf, sig,
+-                       int(paramCount));
+-  free(argbuf);
+-  return nsresult(ret);
++  nsresult ret;
++  auto thunk = paramCount <= kMaxThunkParams ? FindInvokeThunk(key) : nullptr;
++  if (thunk) {
++    ret = thunk(fp, that, args);
++  } else {
++    static bool sWarned = false;
++    if (!sWarned) {
++      sWarned = true;
++      fprintf(stderr, "xptcall: no wasm thunk for signature %s, using JS\n", sig);
++    }
++    ret = nsresult(WasmInvoke(int(intptr_t(fp)), int(intptr_t(that)),
++                              reinterpret_cast<uint8_t*>(args), sig,
++                              int(paramCount)));
++  }
++  if (args != stackArgs) {
++    free(args);
++  }
++  return ret;
+ }
+diff --git a/xpcom/reflect/xptcall/md/unix/xptcstubs_wasm.cpp b/xpcom/reflect/xptcall/md/unix/xptcstubs_wasm.cpp
+index 9f19ad289c..826225e3a4 100644
+--- a/xpcom/reflect/xptcall/md/unix/xptcstubs_wasm.cpp
++++ b/xpcom/reflect/xptcall/md/unix/xptcstubs_wasm.cpp
+@@ -20,6 +20,7 @@
+ 
+ #include "xptcprivate.h"
+ 
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <unordered_map>
+@@ -193,6 +194,43 @@ EM_JS(int, WasmAddStub, (int methodIndex, const char* sigPtr), {
+   return addFunction(fn, sig);
+ });
+ 
++namespace xpt::detail::wasm {
++struct StubThunk {
++  uint64_t mKey;
++  void* mFn;
++};
++extern const StubThunk sStubThunks[];
++extern const uint32_t sStubThunksSize;
++}  // namespace xpt::detail::wasm
++
++// Typed pure-wasm vtable slot for (methodIndex, signature), generated into
++// xptdata.cpp by xptcodegen.py; nullptr if the pair was not generated.
++static void* FindStubThunk(uint32_t aMethodIndex, const char* aSig) {
++  using namespace xpt::detail::wasm;
++  const char* params = aSig + 2;
++  size_t count = strlen(params);
++  if (count > 24) {
++    return nullptr;
++  }
++  uint64_t key = (uint64_t(aMethodIndex) << 56) | count;
++  for (size_t i = 0; i < count; i++) {
++    char c = params[i];
++    key |= uint64_t(c == 'i' ? 0 : c == 'j' ? 1 : c == 'f' ? 2 : 3) << (6 + 2 * i);
++  }
++  uint32_t lo = 0, hi = sStubThunksSize;
++  while (lo < hi) {
++    uint32_t mid = (lo + hi) / 2;
++    if (sStubThunks[mid].mKey < key) {
++      lo = mid + 1;
++    } else {
++      hi = mid;
++    }
++  }
++  return lo < sStubThunksSize && sStubThunks[lo].mKey == key
++             ? sStubThunks[lo].mFn
++             : nullptr;
++}
++
+ static mozilla::StaticMutex sVtableMutex MOZ_UNANNOTATED;
+ 
+ static std::unordered_map<const nsXPTInterfaceInfo*, void**>* sVtableCache =
+@@ -222,8 +260,13 @@ static void** WasmGetOrBuildVtable(const nsXPTInterfaceInfo* aEntry) {
+     } else {
+       strcpy(sig, "ii");
+     }
+-    int idx = WasmAddStub(int(mi), sig);
+-    vtable[mi] = reinterpret_cast<void*>(intptr_t(idx));
++    void* thunk = FindStubThunk(mi, sig);
++    if (!thunk) {
++      fprintf(stderr, "xptcall: no wasm stub for %s method %u (%s), using JS\n",
++              aEntry->Name(), mi, sig);
++      thunk = reinterpret_cast<void*>(intptr_t(WasmAddStub(int(mi), sig)));
++    }
++    vtable[mi] = thunk;
+   }
+ 
+   (*sVtableCache)[aEntry] = vtable;
+diff --git a/xpcom/reflect/xptinfo/xptcodegen.py b/xpcom/reflect/xptinfo/xptcodegen.py
+index d089e84807..9e7fe456c1 100644
+--- a/xpcom/reflect/xptinfo/xptcodegen.py
++++ b/xpcom/reflect/xptinfo/xptcodegen.py
+@@ -588,6 +588,125 @@ const uint16_t sInterfacesSize = std::size(sInterfaces);
+ """
+     )
+ 
++    fd.write(wasm_xptcall_thunks(interfaces))
++
++
++_WASM_ARITH_CHARS = {"TD_INT64": "j", "TD_UINT64": "j", "TD_FLOAT": "f", "TD_DOUBLE": "d"}
++_WASM_ARITH_TAGS = {
++    "TD_INT8", "TD_INT16", "TD_INT32", "TD_INT64", "TD_UINT8", "TD_UINT16",
++    "TD_UINT32", "TD_UINT64", "TD_FLOAT", "TD_DOUBLE", "TD_BOOL", "TD_CHAR", "TD_WCHAR",
++}
++_WASM_CTYPES = {"i": "int32_t", "j": "int64_t", "f": "float", "d": "double"}
++_WASM_MAX_THUNK_PARAMS = 24
++
++
++def _wasm_param_char(param):
++    if "out" in param["flags"]:
++        return "i"
++    tag = param["type"]["tag"]
++    if tag not in _WASM_ARITH_TAGS:
++        return "i"
++    return _WASM_ARITH_CHARS.get(tag, "i")
++
++
++def _wasm_method_sig(method):
++    # Mirrors WasmComputeSig (xptcstubs_wasm.cpp) and the variant walk in
++    # NS_InvokeByIndex (xptcinvoke_wasm.cpp), minus the leading return/this.
++    flags = method["flags"]
++    params = method["params"]
++    count = len(params)
++    context = "jscontext" in flags
++    if context and ("getter" in flags or "setter" in flags):
++        context_index = 0
++    elif context:
++        context_index = count - (1 if "hasretval" in flags else 0)
++    else:
++        context_index = -1
++    sig = ""
++    for i, param in enumerate(params):
++        if i == context_index:
++            sig += "i"
++        sig += _wasm_param_char(param)
++    if context_index == count:
++        sig += "i"
++    if "optargc" in flags:
++        sig += "i"
++    return sig
++
++
++def _wasm_sig_key(sig):
++    key = len(sig)
++    for i, c in enumerate(sig):
++        key |= "ijfd".index(c) << (6 + 2 * i)
++    return key
++
++
++def wasm_xptcall_thunks(interfaces):
++    by_name = {iface["name"]: iface for iface in interfaces}
++
++    def method_chain(iface):
++        chain = []
++        while iface:
++            chain.append(iface)
++            iface = by_name.get(iface["parent"]) if iface["parent"] else None
++        return [m for i in reversed(chain) for m in i["methods"]]
++
++    invoke_sigs = set()
++    stub_pairs = set()
++    for iface in interfaces:
++        builtinclass = "builtinclass" in iface["flags"]
++        for index, method in enumerate(method_chain(iface)):
++            sig = _wasm_method_sig(method)
++            if len(sig) > _WASM_MAX_THUNK_PARAMS:
++                continue
++            invoke_sigs.add(sig)
++            if not builtinclass and index >= 3:
++                stub_pairs.add((index, sig))
++
++    out = []
++    w = out.append
++    w("\n#if defined(__wasm__)\n#include <string.h>\n\n")
++    w('extern "C" nsresult WasmXPTCStubDispatch(struct WasmStub*, uint32_t, uint8_t*, uint32_t);\n\n')
++    w("namespace xpt::detail::wasm {\n\n")
++    w("template <typename T>\nstatic inline T Arg(const uint64_t* aArgs, int aIndex) {\n")
++    w("  T v;\n  memcpy(&v, &aArgs[aIndex], sizeof(T));\n  return v;\n}\n\n")
++    w("template <typename T>\nstatic inline void Put(uint64_t* aArgs, int aIndex, T aValue) {\n")
++    w("  memcpy(&aArgs[aIndex], &aValue, sizeof(T));\n}\n\n")
++
++    invoke = sorted(invoke_sigs, key=_wasm_sig_key)
++    for n, sig in enumerate(invoke):
++        types = ", ".join(["void*"] + [_WASM_CTYPES[c] for c in sig])
++        args = ", ".join(["aThis"] + ["Arg<%s>(aArgs, %d)" % (_WASM_CTYPES[c], i) for i, c in enumerate(sig)])
++        w("static nsresult Invoke%d(void* aFunc, void* aThis, const uint64_t* aArgs) {\n" % n)
++        if not sig:
++            w("  (void)aArgs;\n")
++        w("  return reinterpret_cast<nsresult (*)(%s)>(aFunc)(%s);\n}\n" % (types, args))
++
++    stubs = sorted(stub_pairs, key=lambda p: (p[0] << 56) | _wasm_sig_key(p[1]))
++    for index, sig in stubs:
++        params = ", ".join(["WasmStub* aSelf"] + ["%s a%d" % (_WASM_CTYPES[c], i) for i, c in enumerate(sig)])
++        w("static nsresult Stub%d_%s(%s) {\n" % (index, sig or "v", params))
++        if sig:
++            w("  uint64_t b[%d] = {};\n" % len(sig))
++            for i, c in enumerate(sig):
++                w("  Put(b, %d, a%d);\n" % (i, i))
++            w("  return WasmXPTCStubDispatch(aSelf, %d, reinterpret_cast<uint8_t*>(b), %d);\n}\n" % (index, len(sig)))
++        else:
++            w("  return WasmXPTCStubDispatch(aSelf, %d, nullptr, 0);\n}\n" % index)
++
++    w("\nstruct InvokeThunk {\n  uint64_t mKey;\n  nsresult (*mFn)(void*, void*, const uint64_t*);\n};\n")
++    w("struct StubThunk {\n  uint64_t mKey;\n  void* mFn;\n};\n\n")
++    w("extern const InvokeThunk sInvokeThunks[] = {\n")
++    for n, sig in enumerate(invoke):
++        w("  {0x%xULL, Invoke%d}, // %s\n" % (_wasm_sig_key(sig), n, sig or "-"))
++    w("};\nextern const uint32_t sInvokeThunksSize = std::size(sInvokeThunks);\n\n")
++    w("extern const StubThunk sStubThunks[] = {\n")
++    for index, sig in stubs:
++        w("  {0x%xULL, reinterpret_cast<void*>(&Stub%d_%s)},\n" % ((index << 56) | _wasm_sig_key(sig), index, sig or "v"))
++    w("};\nextern const uint32_t sStubThunksSize = std::size(sStubThunks);\n\n")
++    w("}  // namespace xpt::detail::wasm\n#endif  // __wasm__\n")
++    return "".join(out)
++
+ 
+ def link_and_write(files, outfile, outheader):
+     interfaces = []

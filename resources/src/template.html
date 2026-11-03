@@ -1,0 +1,191 @@
+<!doctype html>
+<!--LICENSE_HEADER-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Firefox (Gecko WASM)</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e66000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'/%3E%3Cpath d='M2 12h20'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f4f3f1;
+  --panel: #ffffff;
+  --text: #1d1c1a;
+  --muted: #6b6862;
+  --line: #e3e0db;
+  --accent: #e66000;
+  --accent-ink: #ffffff;
+  --ok: #2f7d32;
+  --warn: #a15c00;
+  --fail: #b3261e;
+  --code: #f1efeb;
+  --log-bg: #1b1a19;
+  --log-text: #d9d5cf;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131211;
+    --panel: #1d1c1a;
+    --text: #ecebe8;
+    --muted: #a19d96;
+    --line: #34322f;
+    --accent: #ff8a3d;
+    --accent-ink: #1a0d00;
+    --ok: #7ccf7f;
+    --warn: #e5a54a;
+    --fail: #ff8a80;
+    --code: #2a2826;
+    --log-bg: #0d0c0c;
+    --log-text: #cfcac3;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+svg.i { width: 18px; height: 18px; flex: none; }
+code { font: 13px ui-monospace, "Cascadia Code", Consolas, monospace; background: var(--code); padding: 1px 5px; border-radius: 4px; }
+
+#splash { min-height: 100%; display: flex; justify-content: center; padding: 40px 16px; }
+#splash.done { display: none; }
+.panel { width: 100%; max-width: 720px; display: flex; flex-direction: column; gap: 18px; }
+.head { display: flex; gap: 14px; align-items: center; }
+.head .mark { width: 48px; height: 48px; border-radius: 12px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; }
+.head .mark svg { width: 28px; height: 28px; }
+.head h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
+.head p { margin: 2px 0 0; color: var(--muted); }
+
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+.blocked { display: none; border-color: var(--fail); }
+body[data-blocked="1"] .blocked { display: block; }
+.blocked h2 { margin: 0 0 6px; font-size: 16px; display: flex; gap: 8px; align-items: center; color: var(--fail); }
+.blocked p, .blocked li { margin: 6px 0; }
+.proof { font: 12.5px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; background: var(--code); padding: 8px 10px; border-radius: 6px; word-break: break-word; }
+.cmd { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; }
+.cmd pre { flex: 1; margin: 0; padding: 8px 10px; background: var(--code); border-radius: 6px; white-space: pre-wrap; word-break: break-all; font: 12.5px/1.45 ui-monospace, "Cascadia Code", Consolas, monospace; }
+.cmd button { padding: 7px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: 600 13px system-ui, sans-serif; cursor: pointer; }
+
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.checks li { display: grid; grid-template-columns: 18px 170px 1fr; gap: 10px; align-items: start; }
+.checks .dot { width: 10px; height: 10px; border-radius: 50%; margin: 6px 4px; background: var(--line); }
+.checks li[data-state="ok"] .dot { background: var(--ok); }
+.checks li[data-state="warn"] .dot { background: var(--warn); }
+.checks li[data-state="fail"] .dot { background: var(--fail); }
+.checks li[data-state="pending"] .dot { background: var(--muted); animation: pulse 1s ease-in-out infinite; }
+.checks b { font-weight: 600; }
+.check-detail { color: var(--muted); }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (max-width: 560px) { .checks li { grid-template-columns: 18px 1fr; } .check-detail { grid-column: 2; } }
+
+.repo { margin: 4px 0 0; font-size: 13px; }
+.repo a, .doc a { color: var(--accent); }
+.docs summary { cursor: pointer; display: flex; gap: 8px; align-items: center; font-weight: 600; list-style: none; }
+.docs summary::-webkit-details-marker { display: none; }
+.doc h3 { margin: 16px 0 4px; font-size: 14px; }
+.doc p, .doc li { margin: 4px 0; }
+.doc ul { margin: 4px 0; padding-left: 20px; }
+.public-wisp button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: 600 13px system-ui, sans-serif; cursor: pointer; }
+.public-wisp small { margin-top: 6px; }
+.progress-track { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+#progress-fill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.progress-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 13px; }
+#progress-label { color: var(--text); }
+
+details.options summary { cursor: pointer; display: flex; gap: 8px; align-items: center; font-weight: 600; list-style: none; }
+details.options summary::-webkit-details-marker { display: none; }
+.opt-grid { display: grid; gap: 14px; margin-top: 14px; }
+.opt-grid label.toggle { display: flex; gap: 10px; align-items: flex-start; }
+.opt-grid label.toggle input { margin-top: 4px; accent-color: var(--accent); }
+.opt-grid small { display: block; color: var(--muted); }
+.opt-grid .field span { display: block; font-weight: 600; }
+.opt-grid input[type="text"] { width: 100%; margin-top: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: 13px ui-monospace, "Cascadia Code", Consolas, monospace; }
+
+#launch { display: inline-flex; gap: 10px; align-items: center; justify-content: center; padding: 12px 22px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font: 600 15px system-ui, sans-serif; cursor: pointer; align-self: flex-start; }
+#launch:disabled { opacity: .45; cursor: not-allowed; }
+#launch svg { width: 16px; height: 16px; }
+
+.log-head { display: flex; gap: 8px; align-items: center; font-weight: 600; margin-bottom: 8px; }
+#log { background: var(--log-bg); color: var(--log-text); border-radius: 8px; padding: 10px 12px; height: 220px; overflow: auto; font: 12px/1.45 ui-monospace, "Cascadia Code", Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.log-line.warn { color: #e8c37a; }
+.log-line.error { color: #ff9b91; }
+body[data-phase="checking"] .log-card, body[data-phase="decoding"] .log-card { opacity: .7; }
+
+footer { color: var(--muted); font-size: 12.5px; }
+footer p { margin: 4px 0; }
+footer details pre { max-height: 260px; overflow: auto; background: var(--code); padding: 10px; border-radius: 6px; white-space: pre-wrap; font-size: 11.5px; }
+
+#screen { display: none; position: fixed; inset: 0; width: 100vw; height: 100vh; border: 0; outline: none; background: #fff; image-rendering: pixelated; }
+#screen.ready { display: block; }
+</style>
+</head>
+<body data-phase="checking">
+<div id="splash">
+  <main class="panel">
+    <div class="head">
+      <div class="mark"><svg class="i" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg></div>
+      <div>
+        <h1>Firefox, compiled to WebAssembly</h1>
+        <p>The real Gecko engine and Firefox front-end, embedded in this one HTML file.</p>
+      </div>
+    </div>
+
+    <section class="card blocked">
+      <h2><svg class="i" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg><span id="blocked-title">Firefox can't start in this browser</span></h2>
+      <p id="blocked-jspi" hidden>This browser doesn't support WebAssembly JSPI (stack switching). The engine needs it to run Gecko's threads, whether they take turns on this page or run on Web Workers. Chrome and Edge support it from version 137.</p>
+      <p id="engine-proof" class="proof" hidden>Compiling the Gecko engine module...</p>
+    </section>
+
+    <section class="card">
+      <ul class="checks">
+        <li data-check="jspi" data-state="pending"><span class="dot"></span><b>WebAssembly JSPI</b><span class="check-detail">Checking</span></li>
+        <li data-check="threads" data-state="pending"><span class="dot"></span><b>Threads</b><span class="check-detail">Checking</span></li>
+        <li data-check="storage" data-state="pending"><span class="dot"></span><b>Profile storage</b><span class="check-detail">Checking</span></li>
+        <li data-check="webgl" data-state="pending"><span class="dot"></span><b>GPU</b><span class="check-detail">Checking</span></li>
+        <li data-check="wisp" data-state="pending"><span class="dot"></span><b>Network (WISP)</b><span class="check-detail">Checking</span></li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <div class="progress-track"><div id="progress-fill"></div></div>
+      <div class="progress-meta"><span id="progress-label">Waiting for checks</span><span id="progress-detail"></span></div>
+    </section>
+
+    <section class="card">
+      <details class="options">
+        <summary><svg class="i" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>Options</summary>
+        <div class="opt-grid">
+          <label class="toggle"><input type="checkbox" id="opt-gpu"><span><b>GPU acceleration</b><small>WebRender through your browser's WebGL2: smoother scrolling and animation. Off by default because in testing it drew &lt;canvas&gt; content on web pages with red and blue swapped (images, text and CSS were correct).</small></span></label>
+          <label class="toggle"><input type="checkbox" id="opt-quiet"><span><b>Block Firefox's background calls to Mozilla</b><small>Like desktop Firefox, the engine contacts Remote Settings and a region service on its own. On by default: these Firefox prefs keep it local. Sites you open are unaffected.</small></span></label>
+          <label class="toggle"><input type="checkbox" id="opt-jit"><span><b>Experimental JS to WASM JIT</b><small>Upstream marks it unusable on many sites. Off by default.</small></span></label>
+          <label class="field"><span>WISP server</span><small>WebSocket proxy that Gecko's network stack (Necko) tunnels TCP through. Browsers cannot open raw sockets, so http(s) sites need one. Enter a relay address here for websites to load. Nothing remote is used unless you enter one or click the button below.</small><input type="text" id="opt-wisp" spellcheck="false" autocomplete="off"></label>
+          <div class="field public-wisp"><button type="button" id="use-public-wisp">Use the official demo's public proxy (Puter)</button><small>Opt-in. Fetches the proxy address the upstream demo uses from <code>sensible-ship-8305.puter.work</code> and fills it in above. Your browsing then goes through Puter's server (HTTPS stays encrypted end to end). Not tested by this build.</small></div>
+          <label class="field"><span>Open after launch</span><small>Optional URL for the first tab, for example <code>about:mozilla</code> or <code>https://example.com/</code>.</small><input type="text" id="opt-start" spellcheck="false" autocomplete="off" placeholder="(Firefox default)"></label>
+        </div>
+      </details>
+    </section>
+
+    <button id="launch" disabled><svg class="i" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg><span>Launch Firefox</span></button>
+
+    <section class="card log-card">
+      <div class="log-head"><svg class="i" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>Startup log</div>
+      <div id="log" role="log"></div>
+    </section>
+
+    <footer>
+      <p id="build-info"></p>
+      <p>Unofficial build of <a href="https://github.com/HeyPuter/firefox-wasm">HeyPuter/firefox-wasm</a>. Gecko and the Firefox front-end are Mozilla code under the Mozilla Public License 2.0; source: <a href="https://github.com/HeyPuter/firefox">HeyPuter/firefox</a>. Firefox is a trademark of the Mozilla Foundation.</p>
+      <details><summary>Licenses</summary><pre id="licenses"><!--LICENSE_TEXT--></pre></details>
+    </footer>
+  </main>
+</div>
+<canvas id="screen" width="1024" height="768" tabindex="0"></canvas>
+<script type="application/json" id="asset-manifest"><!--MANIFEST--></script>
+<!--ASSET_BLOCKS-->
+<script type="module"><!--APP_SCRIPT--></script>
+</body>
+</html>
