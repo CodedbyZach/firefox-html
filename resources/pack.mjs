@@ -6,6 +6,13 @@
 //   WISP_URL=wss://relay.example/ bakes in another one, WISP_URL= (empty) none.
 //   (build.sh / build.ps1 run this as their "pack" stage)
 //
+//   node resources/pack.mjs --repo /path/to/firefox-wasm --engine-from firefox.html
+//   Page-only rebuild: reuses the engine already inside an earlier firefox.html (its four
+//   assets and build info, checked against its SHA-256 manifest) instead of an engine
+//   build, so changes to resources/src take a minute instead of hours. --repo then only
+//   needs a firefox-wasm checkout (build.sh clone) for the loader and LICENSE. The glue is
+//   reused as built, so changes to coop-glue.mjs still need an engine build.
+//
 // Inputs (all produced by the upstream build, nothing is downloaded):
 //   gecko.js/wasm/gecko.js            emscripten glue (main thread + pthread worker script)
 //   gecko.js/wasm/gecko.wasm          the Gecko engine module (zstd'd here, cached)
@@ -21,8 +28,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { patchGlueForCoop } from './coop-glue.mjs';
+import { patchGlueForCoop, COOP_MARKER } from './coop-glue.mjs';
 import { patchLoaderForCoop } from './coop-loader.mjs';
+import { patchLoaderForResolution } from './resolution-loader.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WISP_URL = 'wss://itcode.vip/api/';
@@ -39,9 +47,12 @@ const CHROME_PUBLIC = path.join(REPO, 'demo', 'chrome', 'public');
 fs.mkdirSync(CACHE, { recursive: true });
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 
-const must = (p) => {
+const ENGINE_FROM = arg('engine-from', null);
+const must = (p, hint = ENGINE_FROM
+  ? 'clone firefox-wasm for the loader source (build.sh clone), or point --repo at a checkout'
+  : 'build the engine first (build.sh engine / build.ps1 -Stage engine)') => {
   if (!fs.existsSync(p)) {
-    console.error(`pack: missing ${p}\n  build the engine first (build.sh engine / build.ps1 -Stage engine)`);
+    console.error(`pack: missing ${p}\n  ${hint}`);
     process.exit(1);
   }
   return p;
@@ -53,63 +64,110 @@ const git = (dir) => {
 };
 
 // --- 1. collect the runtime assets ------------------------------------------
-const glueBuilt = fs.readFileSync(must(path.join(WASM_DIR, 'gecko.js')), 'utf8');
-if (!glueBuilt.includes('createGecko')) throw new Error('gecko.js does not look like the MODULARIZE createGecko glue');
-for (const marker of ['__wrHoistVaryings', 'new WebAssembly.Suspending(_gl_present_yield)', '[manual JSPI] promising entry']) {
-  if (!glueBuilt.includes(marker)) throw new Error(`gecko.js is missing the post-link patch marker "${marker}" (patch-gecko-shaderfix.mjs did not run)`);
-}
-if (!glueBuilt.includes('_emscripten_coop_wait')) {
-  throw new Error('gecko.js has no cooperative-thread imports: the engine was linked without the firefox.html patches (build.sh engine applies them)');
-}
-// Single-thread mode for pages that can't share memory with Workers (resources/src/coop.js).
-const glue = Buffer.from(patchGlueForCoop(glueBuilt));
-const dataZst = fs.readFileSync(must(path.join(WASM_DIR, 'gecko.data.zst')));
-const engineMeta = JSON.parse(fs.readFileSync(must(path.join(WASM_DIR, 'gecko-assets.json')), 'utf8'));
-const dataRawPath = path.join(WASM_DIR, 'gecko.data');
-const dataRaw = fs.existsSync(dataRawPath) ? fs.readFileSync(dataRawPath) : null;
+// From the engine build in --repo, or with --engine-from from an earlier firefox.html.
+const ASSET_NAMES = ['gecko.js', 'gecko.data', 'chrome-assets.tar', 'gecko.wasm'];
 
-// The wasm: prefer the raw module (make web); zstd -19 --long=27 once, cached by hash.
-// (128 MB window, the same as upstream's --ultra -22 release path, so zstddec decodes
-// it the same way; -22 is ~10x slower for ~4% less.)
-let wasmZst;
-let wasmRawSha;
-let wasmSize;
-const wasmRawPath = path.join(WASM_DIR, 'gecko.wasm');
-if (fs.existsSync(wasmRawPath)) {
-  const raw = fs.readFileSync(wasmRawPath);
-  wasmRawSha = sha256(raw);
-  wasmSize = raw.length;
-  // PACK_ZSTD_LEVEL (default 19) only trades file size for packing time.
-  const level = String(Number(process.env.PACK_ZSTD_LEVEL) || 19);
-  const cached = path.join(CACHE, `gecko.wasm.${wasmRawSha.slice(0, 16)}${level === '19' ? '' : '.l' + level}.zst`);
-  if (!fs.existsSync(cached)) {
-    console.log(`pack: zstd -${level} --long=27 gecko.wasm (${mb(raw.length)}), one-time, cached in build-cache/`);
-    execFileSync('zstd', ['-q', '-f', `-${level}`, '--long=27', '-T0', wasmRawPath, '-o', cached + '.tmp'], { stdio: 'inherit' });
-    fs.renameSync(cached + '.tmp', cached);
+function checkGlue(src, what) {
+  if (!src.includes('createGecko')) throw new Error(`${what} does not look like the MODULARIZE createGecko glue`);
+  for (const marker of ['__wrHoistVaryings', 'new WebAssembly.Suspending(_gl_present_yield)', '[manual JSPI] promising entry']) {
+    if (!src.includes(marker)) throw new Error(`${what} is missing the post-link patch marker "${marker}" (patch-gecko-shaderfix.mjs did not run)`);
   }
-  wasmZst = fs.readFileSync(cached);
-} else {
-  const zstPath = must(path.join(WASM_DIR, 'gecko.wasm.zst'));
-  wasmZst = fs.readFileSync(zstPath);
-  const raw = execFileSync('zstd', ['-dc', zstPath], { maxBuffer: 2 ** 31 - 1 });
-  wasmRawSha = sha256(raw);
-  wasmSize = raw.length;
+  if (!src.includes('_emscripten_coop_wait')) {
+    throw new Error(`${what} has no cooperative-thread imports: the engine was linked without the firefox.html patches (build.sh engine applies them)`);
+  }
 }
-if (wasmSize !== engineMeta.wasmSize) throw new Error(`gecko.wasm is ${wasmSize} bytes but gecko-assets.json says ${engineMeta.wasmSize}`);
 
-const chromeZst = fs.readFileSync(must(path.join(CHROME_PUBLIC, 'chrome-assets.tar.zst')));
-const chromeMeta = JSON.parse(fs.readFileSync(must(path.join(CHROME_PUBLIC, 'chrome-assets.json')), 'utf8'));
-const chromeRaw = execFileSync('zstd', ['-dc', path.join(CHROME_PUBLIC, 'chrome-assets.tar.zst')], { maxBuffer: 2 ** 31 - 1 });
-if (chromeRaw.length !== chromeMeta.uncompressedSize) throw new Error('chrome-assets.tar.zst size does not match chrome-assets.json');
+function engineFromBuild() {
+  const glueBuilt = fs.readFileSync(must(path.join(WASM_DIR, 'gecko.js')), 'utf8');
+  checkGlue(glueBuilt, 'gecko.js');
+  // Single-thread mode for pages that can't share memory with Workers (resources/src/coop.js).
+  const glue = Buffer.from(patchGlueForCoop(glueBuilt));
+  const dataZst = fs.readFileSync(must(path.join(WASM_DIR, 'gecko.data.zst')));
+  const engineMeta = JSON.parse(fs.readFileSync(must(path.join(WASM_DIR, 'gecko-assets.json')), 'utf8'));
+  const dataRawPath = path.join(WASM_DIR, 'gecko.data');
+  const dataRaw = fs.existsSync(dataRawPath) ? fs.readFileSync(dataRawPath) : null;
 
-const assets = [
-  { name: 'gecko.js', bytes: glue, compression: 'none' },
-  { name: 'gecko.data', bytes: dataZst, compression: 'zstd', size: engineMeta.dataSize, sha256Raw: dataRaw ? sha256(dataRaw) : undefined },
-  { name: 'chrome-assets.tar', bytes: chromeZst, compression: 'zstd', size: chromeRaw.length, sha256Raw: sha256(chromeRaw) },
-  { name: 'gecko.wasm', bytes: wasmZst, compression: 'zstd', size: wasmSize, sha256Raw: wasmRawSha },
-];
+  // The wasm: prefer the raw module (make web); zstd -19 --long=27 once, cached by hash.
+  // (128 MB window, the same as upstream's --ultra -22 release path, so zstddec decodes
+  // it the same way; -22 is ~10x slower for ~4% less.)
+  let wasmZst;
+  let wasmRawSha;
+  let wasmSize;
+  const wasmRawPath = path.join(WASM_DIR, 'gecko.wasm');
+  if (fs.existsSync(wasmRawPath)) {
+    const raw = fs.readFileSync(wasmRawPath);
+    wasmRawSha = sha256(raw);
+    wasmSize = raw.length;
+    // PACK_ZSTD_LEVEL (default 19) only trades file size for packing time.
+    const level = String(Number(process.env.PACK_ZSTD_LEVEL) || 19);
+    const cached = path.join(CACHE, `gecko.wasm.${wasmRawSha.slice(0, 16)}${level === '19' ? '' : '.l' + level}.zst`);
+    if (!fs.existsSync(cached)) {
+      console.log(`pack: zstd -${level} --long=27 gecko.wasm (${mb(raw.length)}), one-time, cached in build-cache/`);
+      execFileSync('zstd', ['-q', '-f', `-${level}`, '--long=27', '-T0', wasmRawPath, '-o', cached + '.tmp'], { stdio: 'inherit' });
+      fs.renameSync(cached + '.tmp', cached);
+    }
+    wasmZst = fs.readFileSync(cached);
+  } else {
+    const zstPath = must(path.join(WASM_DIR, 'gecko.wasm.zst'));
+    wasmZst = fs.readFileSync(zstPath);
+    const raw = execFileSync('zstd', ['-dc', zstPath], { maxBuffer: 2 ** 31 - 1 });
+    wasmRawSha = sha256(raw);
+    wasmSize = raw.length;
+  }
+  if (wasmSize !== engineMeta.wasmSize) throw new Error(`gecko.wasm is ${wasmSize} bytes but gecko-assets.json says ${engineMeta.wasmSize}`);
 
-const emVersionFile = path.join(REPO, 'emsdk', 'upstream', 'emscripten', 'emscripten-version.txt');
+  const chromeZst = fs.readFileSync(must(path.join(CHROME_PUBLIC, 'chrome-assets.tar.zst')));
+  const chromeMeta = JSON.parse(fs.readFileSync(must(path.join(CHROME_PUBLIC, 'chrome-assets.json')), 'utf8'));
+  const chromeRaw = execFileSync('zstd', ['-dc', path.join(CHROME_PUBLIC, 'chrome-assets.tar.zst')], { maxBuffer: 2 ** 31 - 1 });
+  if (chromeRaw.length !== chromeMeta.uncompressedSize) throw new Error('chrome-assets.tar.zst size does not match chrome-assets.json');
+
+  const emVersionFile = path.join(REPO, 'emsdk', 'upstream', 'emscripten', 'emscripten-version.txt');
+  return {
+    assets: [
+      { name: 'gecko.js', bytes: glue, compression: 'none' },
+      { name: 'gecko.data', bytes: dataZst, compression: 'zstd', size: engineMeta.dataSize, sha256Raw: dataRaw ? sha256(dataRaw) : undefined },
+      { name: 'chrome-assets.tar', bytes: chromeZst, compression: 'zstd', size: chromeRaw.length, sha256Raw: sha256(chromeRaw) },
+      { name: 'gecko.wasm', bytes: wasmZst, compression: 'zstd', size: wasmSize, sha256Raw: wasmRawSha },
+    ],
+    build: {
+      firefoxWasmCommit: git(REPO),
+      geckoCommit: git(path.join(REPO, 'firefox')),
+      geckoVersion: fs.existsSync(path.join(REPO, 'firefox/browser/config/version.txt'))
+        ? fs.readFileSync(path.join(REPO, 'firefox/browser/config/version.txt'), 'utf8').trim() : 'unknown',
+      emscripten: fs.existsSync(emVersionFile) ? fs.readFileSync(emVersionFile, 'utf8').trim().replace(/"/g, '') : 'unknown',
+    },
+  };
+}
+
+// --engine-from: the four engine assets of an earlier firefox.html, byte for byte, each
+// checked against that file's manifest, plus the build info that describes them.
+function engineFromHtml(file) {
+  const html = fs.readFileSync(must(file, 'pass an existing firefox.html to --engine-from'));
+  const scriptBody = (open, encoding) => {
+    const at = html.indexOf(open);
+    const end = at < 0 ? -1 : html.indexOf('</script>', at + open.length);
+    return end < 0 ? null : html.toString(encoding, at + open.length, end);
+  };
+  const old = JSON.parse(scriptBody('<script type="application/json" id="asset-manifest">', 'utf8') || 'null');
+  if (!old || old.format !== 1 || !old.assets || !old.build) throw new Error(`${file} has no firefox.html asset manifest`);
+  const assets = ASSET_NAMES.map((name) => {
+    const meta = old.assets[name];
+    const b64 = scriptBody(`<script type="application/octet-stream" data-asset="${name}" data-encoding="base64">`, 'latin1');
+    if (!meta || b64 === null) throw new Error(`${file} has no embedded ${name}`);
+    const bytes = Buffer.from(b64, 'base64');
+    if (bytes.length !== meta.stored || sha256(bytes) !== meta.sha256) throw new Error(`${file}: the embedded ${name} does not match its manifest (corrupt file?)`);
+    return { name, bytes, compression: meta.compression, size: meta.size, sha256Raw: meta.sha256Raw };
+  });
+  const glueSrc = assets[0].bytes.toString('utf8');
+  checkGlue(glueSrc, `gecko.js in ${path.basename(file)}`);
+  if (!glueSrc.includes(COOP_MARKER)) throw new Error(`gecko.js in ${path.basename(file)} lacks the single-thread glue patches`);
+  const { firefoxWasmCommit, geckoCommit, geckoVersion, emscripten } = old.build;
+  console.log(`pack: engine from ${file} (Gecko ${geckoVersion}, packed ${old.build.date})`);
+  return { assets, build: { firefoxWasmCommit, geckoCommit, geckoVersion, emscripten } };
+}
+
+const engine = ENGINE_FROM ? engineFromHtml(path.resolve(ENGINE_FROM)) : engineFromBuild();
+const { assets } = engine;
 const manifest = {
   format: 1,
   assets: Object.fromEntries(assets.map((a) => [a.name, {
@@ -121,11 +179,7 @@ const manifest = {
     ...(a.sha256Raw ? { sha256Raw: a.sha256Raw } : {}),
   }])),
   build: {
-    firefoxWasmCommit: git(REPO),
-    geckoCommit: git(path.join(REPO, 'firefox')),
-    geckoVersion: fs.existsSync(path.join(REPO, 'firefox/browser/config/version.txt'))
-      ? fs.readFileSync(path.join(REPO, 'firefox/browser/config/version.txt'), 'utf8').trim() : 'unknown',
-    emscripten: fs.existsSync(emVersionFile) ? fs.readFileSync(emVersionFile, 'utf8').trim().replace(/"/g, '') : 'unknown',
+    ...engine.build,
     date: new Date().toISOString().slice(0, 10),
     defaultWisp: process.env.WISP_URL ?? DEFAULT_WISP_URL,
   },
@@ -151,12 +205,13 @@ const embeddedAssetsPlugin = {
     }));
   },
 };
-// Single-thread mode repaint policy for the upstream loader (coop-loader.mjs).
+// Pack-time patches to the upstream loader: the single-thread repaint policy
+// (coop-loader.mjs) and wheel scrolling at the Resolution option's sizes (resolution-loader.mjs).
 const coopLoaderPlugin = {
   name: 'firefox-html-coop-loader',
   setup(b) {
     b.onLoad({ filter: /[\\/]gecko\.js[\\/]js[\\/]index\.ts$/ }, (a) => ({
-      contents: patchLoaderForCoop(fs.readFileSync(a.path, 'utf8')),
+      contents: patchLoaderForResolution(patchLoaderForCoop(fs.readFileSync(a.path, 'utf8'))),
       loader: 'ts',
     }));
   },
@@ -179,6 +234,7 @@ const bundle = await build({
 let appJs = bundle.outputFiles[0].text;
 if (!appJs.includes('READY cmd=')) throw new Error('bundled loader does not contain gecko.js/js/index.ts');
 if (!appJs.includes('coopFrameHash')) throw new Error('bundled loader is missing the single-thread repaint patch');
+if (!appJs.includes('e.deltaY * (this.H / r.height)')) throw new Error('bundled loader is missing the resolution wheel patch');
 appJs = appJs.replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\!--');
 
 // --- 3. assemble firefox.html ---------------------------------------------------

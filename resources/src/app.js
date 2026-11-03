@@ -23,6 +23,9 @@ const optJit = $('opt-jit');
 const optWisp = $('opt-wisp');
 const optStart = $('opt-start');
 const optQuiet = $('opt-quiet');
+const optRes = $('opt-res');
+const resApply = $('res-apply');
+const resCancel = $('res-cancel');
 
 // Firefox's own background calls seen in testing: Remote Settings
 // (firefox.settings.services.mozilla.com) and region lookup
@@ -149,6 +152,95 @@ function defaultWispUrl() {
     return u.href;
   }
   return '';
+}
+
+// ------------------------------------------------------------- resolution --
+// Options > Resolution: how many pixels the engine's screen has. The canvas always fills
+// the page, so above the page's own size (Current) Firefox's text and buttons get smaller
+// and more fits, as on a higher-resolution monitor. The steps are the usual widths up to
+// 4K; the height follows the window's shape so nothing is stretched. (A device pixel
+// ratio above 1 would keep the interface size instead, but this engine reads mouse
+// positions as CSS pixels and tests popup bounds in device pixels, which agree only at 1.)
+const RES_STEPS = [
+  { name: '720p', width: 1280 },
+  { name: '900p', width: 1600 },
+  { name: '1080p', width: 1920 },
+  { name: '1440p', width: 2560 },
+  { name: '1800p', width: 3200 },
+  { name: '4K', width: 3840 },
+];
+let resStops = [{ name: 'Current', width: 0 }];
+let resApplied = 0; // width of the applied step; 0 = Current (the page's own size)
+let launched = false;
+
+const pageW = () => Math.max(1, innerWidth);
+const pageH = () => Math.max(1, innerHeight);
+function resSize(width) {
+  const w = width || pageW();
+  return { width: w, height: Math.max(1, Math.round((w * pageH()) / pageW())), scale: w / pageW() };
+}
+// Index of the step for a width: that step, or the nearest one below it if the window
+// has grown past it since (steps under 5% above the page's width are left out).
+function resIndexFor(width) {
+  let best = 0;
+  resStops.forEach((s, i) => { if (s.width && s.width <= width) best = i; });
+  return best;
+}
+
+function renderRes() {
+  const i = Number(optRes.value);
+  const { name, width: stepWidth } = resStops[i] || resStops[0];
+  const { width, height, scale } = resSize(stepWidth);
+  const pending = i !== resIndexFor(resApplied);
+  const out = $('res-value');
+  const label = document.createElement('b');
+  label.textContent = name;
+  out.replaceChildren(label, ` ${width} × ${height}`);
+  if (scale > 1) out.append(`, interface at ${Math.round(100 / scale)}%`);
+  if (pending) out.append(Object.assign(document.createElement('em'), { textContent: ' (not applied)' }));
+  resApply.disabled = resCancel.disabled = !pending || optRes.disabled;
+}
+
+function layoutRes(selectedWidth) {
+  resStops = [{ name: 'Current', width: 0 }, ...RES_STEPS.filter((s) => s.width >= pageW() * 1.05)];
+  optRes.max = String(resStops.length - 1);
+  optRes.disabled = resStops.length < 2;
+  $('res-stops').replaceChildren(...resStops.map((s, i) =>
+    Object.assign(document.createElement('option'), { value: String(i), label: s.name })));
+  optRes.value = String(resIndexFor(selectedWidth));
+  renderRes();
+}
+
+function setupRes(saved) {
+  resApplied = Number(saved.res) || 0;
+  layoutRes(resApplied);
+  optRes.addEventListener('input', renderRes);
+  resApply.addEventListener('click', () => {
+    resApplied = resStops[Number(optRes.value)].width;
+    const o = loadOpts();
+    o.res = resApplied;
+    saveOpts(o);
+    renderRes();
+  });
+  resCancel.addEventListener('click', () => {
+    optRes.value = String(resIndexFor(resApplied));
+    renderRes();
+  });
+  // The steps depend on the window's size; keep the slider's choice while it changes.
+  let t;
+  addEventListener('resize', () => {
+    if (launched) return;
+    clearTimeout(t);
+    t = setTimeout(() => layoutRes(resStops[Number(optRes.value)]?.width ?? 0), 150);
+  });
+}
+
+// Fit the engine's pixels to the page: smooth when they are shrunk (more of them than the
+// screen has), pixelated as before when enlarged; and keep GPU mode's surfaces, which the
+// loader sizes to the engine's pixels, filling the page (template.html: body.res-scaled).
+function fitScreen(engineWidth) {
+  canvas.classList.toggle('smooth', engineWidth > pageW() * devicePixelRatio + 0.5);
+  document.body.classList.toggle('res-scaled', engineWidth !== pageW());
 }
 
 // ------------------------------------------------------------ asset decode --
@@ -322,6 +414,7 @@ async function main() {
   optStart.value = saved.start ?? '';
   optJit.checked = saved.jit ?? false;
   optQuiet.checked = saved.quiet ?? true;
+  setupRes(saved);
   $('build-info').textContent = `Gecko ${manifest.build.geckoVersion} (HeyPuter/firefox @ ${manifest.build.geckoCommit.slice(0, 10)}), firefox-wasm @ ${manifest.build.firefoxWasmCommit.slice(0, 10)}, emscripten ${manifest.build.emscripten}, built ${manifest.build.date}`;
 
   setPhase('checking');
@@ -356,11 +449,15 @@ async function main() {
 }
 
 async function launch() {
+  launched = true;
   launchBtn.disabled = true;
   launchBtn.querySelector('span').textContent = 'Starting Firefox';
-  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet]) el.disabled = true;
+  // Apply is what sets the resolution; an unapplied slider position is dropped.
+  optRes.value = String(resIndexFor(resApplied));
+  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet, optRes]) el.disabled = true;
+  renderRes();
   setPhase('booting');
-  const opts = { gpu: optGpu.checked, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked };
+  const opts = { gpu: optGpu.checked, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, res: resApplied };
   saveOpts(opts);
   if (opts.quiet) {
     addVirtualFile(decoded.chromeIndex, QUIET_PREFS_PATH, QUIET_PREFS);
@@ -390,11 +487,19 @@ async function launch() {
     console.log('[firefox.html] single-thread mode: engine threads run cooperatively on the page thread');
   }
 
+  // Resolution (Options): the engine's screen, kept at this scale of the page when the window resizes.
+  const res = resSize(resStops[resIndexFor(resApplied)].width);
+  const engineSize = () => [Math.round(pageW() * res.scale), Math.round(pageH() * res.scale)];
+  const [engineW, engineH] = engineSize();
+  fitScreen(engineW);
+  console.log(`[firefox.html] resolution ${engineW}x${engineH}` +
+    (res.scale !== 1 ? ` (page ${pageW()}x${pageH()}, x${res.scale.toFixed(2)})` : ''));
+
   const t0 = performance.now();
   const gecko = new Gecko({
     canvas,
-    width: innerWidth,
-    height: innerHeight,
+    width: engineW,
+    height: engineH,
     wasm: { url: decoded.wasmUrl, compressed: false },
     env: engineEnv,
     fs: decoded.chromeFs,
@@ -430,11 +535,16 @@ async function launch() {
     canvas.focus();
     window.geckoLoad = (u) => gecko.load(u);
     window.geckoEvalChrome = (js) => gecko.evalChrome(js);
-    window.__firefoxHtml = { booted: true, bootSeconds: (performance.now() - t0) / 1000, gpu: opts.gpu };
+    window.__firefoxHtml = { booted: true, bootSeconds: (performance.now() - t0) / 1000, gpu: opts.gpu, resolution: { width: engineW, height: engineH, scale: res.scale } };
 
-    await gecko.resize(innerWidth, innerHeight);
+    const resizeEngine = () => {
+      const [w, h] = engineSize();
+      fitScreen(w);
+      return gecko.resize(w, h);
+    };
+    await resizeEngine();
     let rt;
-    addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => gecko.resize(innerWidth, innerHeight), 200); });
+    addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(resizeEngine, 200); });
   } catch (e) {
     console.error('[firefox.html] startup failed', e);
     setPhase('error');
