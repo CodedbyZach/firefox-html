@@ -112,6 +112,7 @@ details.options summary::-webkit-details-marker { display: none; }
 .res-actions button { padding: 6px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: 600 13px system-ui, sans-serif; cursor: pointer; }
 .res-actions #res-apply { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .res-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.opt-grid small.forced { color: var(--warn); margin-top: 2px; }
 
 #launch { display: inline-flex; gap: 10px; align-items: center; justify-content: center; padding: 12px 22px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font: 600 15px system-ui, sans-serif; cursor: pointer; align-self: flex-start; }
 #launch:disabled { opacity: .45; cursor: not-allowed; }
@@ -173,7 +174,7 @@ body.res-scaled #screen, body.res-scaled #popup-overlay, body.res-scaled [data-l
         <div class="opt-grid">
           <div class="field">
             <span>Resolution</span>
-            <small>Gives Firefox a bigger screen, shown scaled to fit this page. Above Current, text and buttons get smaller and more fits on screen, like a higher monitor resolution, and on a high-DPI display they also get sharper. Higher resolutions take longer to draw.</small>
+            <small>How many pixels Firefox is drawn with. Everything stays the same size; text, images and edges get sharper. The step that matches your screen is the sharpest it gets; higher steps smooth edges a little more but take longer to draw. Above Current, GPU acceleration turns on, since it is what draws the extra pixels.</small>
             <input type="range" id="opt-res" min="0" max="0" step="1" value="0" list="res-stops" aria-label="Resolution" aria-describedby="res-value">
             <datalist id="res-stops"></datalist>
             <div class="res-row">
@@ -184,7 +185,7 @@ body.res-scaled #screen, body.res-scaled #popup-overlay, body.res-scaled [data-l
               </div>
             </div>
           </div>
-          <label class="toggle"><input type="checkbox" id="opt-gpu"><span><b>GPU acceleration</b><small>WebRender through your browser's WebGL2: smoother scrolling and animation. Off by default because in testing it drew &lt;canvas&gt; content on web pages with red and blue swapped (images, text and CSS were correct).</small></span></label>
+          <label class="toggle"><input type="checkbox" id="opt-gpu"><span><b>GPU acceleration</b><small>WebRender through your browser's WebGL2: smoother scrolling and animation. Off by default because in testing it drew &lt;canvas&gt; content on web pages with red and blue swapped (images, text and CSS were correct).</small><small id="gpu-forced" class="forced" hidden>On because Resolution is above Current.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-quiet"><span><b>Block Firefox's background calls to Mozilla</b><small>Like desktop Firefox, the engine contacts Remote Settings and a region service on its own. On by default: these Firefox prefs keep it local. Sites you open are unaffected.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-jit"><span><b>Experimental JS to WASM JIT</b><small>Upstream marks it unusable on many sites. Off by default.</small></span></label>
           <label class="field"><span>WISP server</span><small>WebSocket relay that Gecko's network stack (Necko) tunnels TCP through. Browsers cannot open raw sockets, so websites load through this relay. HTTPS stays encrypted end to end (Gecko does the encryption); plain HTTP pages are visible to the relay. Change it to use another relay, or clear it to load only local pages.</small><input type="text" id="opt-wisp" spellcheck="false" autocomplete="off"></label>
@@ -2155,6 +2156,8 @@ var Gecko = class {
   ctx = null;
   gpu = false;
   W;
+  /** Engine (device) pixels per CSS pixel, set by the page for its Resolution option. */
+  cssScale = 1;
   H;
   mod = null;
   cmd = 0;
@@ -2341,6 +2344,10 @@ var Gecko = class {
     this.running = false;
   }
   async runCmd(item) {
+    if (item.press) {
+      const js = `(() => { try { return typeof __fhtmlPress == 'function' ? __fhtmlPress(${item.x}, ${item.y}, ${item.button || 0}) : 'none'; } catch (e) { return 'none'; } })()`;
+      if (await this.runCmd({ op: OP_EVAL, url: js }) !== "none") return null;
+    }
     const m = this.mod;
     const i32 = () => m.HEAP32, u8 = () => m.HEAPU8;
     const set = (off, v) => {
@@ -2550,8 +2557,8 @@ var Gecko = class {
   xy(e) {
     const r = this.canvas.getBoundingClientRect();
     return {
-      x: Math.round((e.clientX - r.left) * (this.W / r.width)),
-      y: Math.round((e.clientY - r.top) * (this.H / r.height))
+      x: Math.round((e.clientX - r.left) * (this.W / r.width) / this.cssScale),
+      y: Math.round((e.clientY - r.top) * (this.H / r.height) / this.cssScale)
     };
   }
   attachInput() {
@@ -2567,7 +2574,7 @@ var Gecko = class {
     on("mousedown", (e) => {
       c.focus();
       const p = this.xy(e);
-      this.run({ op: OP_MOUSE, evType: 1, x: p.x, y: p.y, button: e.button, buttons: e.buttons, clickCount: e.detail, modifiers: this.mods(e) });
+      this.run({ op: OP_MOUSE, evType: 1, x: p.x, y: p.y, button: e.button, buttons: e.buttons, clickCount: e.detail, modifiers: this.mods(e), press: this.cssScale !== 1 });
     });
     on("mouseup", (e) => {
       const p = this.xy(e);
@@ -2580,8 +2587,7 @@ var Gecko = class {
     });
     on("wheel", (e) => {
       const p = this.xy(e);
-      const r = this.canvas.getBoundingClientRect();
-      this.run({ op: OP_WHEEL, x: p.x, y: p.y, deltaX: e.deltaX * (this.W / r.width), deltaY: e.deltaY * (this.H / r.height), modifiers: this.mods(e) });
+      this.run({ op: OP_WHEEL, x: p.x, y: p.y, deltaX: e.deltaX * this.cssScale, deltaY: e.deltaY * this.cssScale, modifiers: this.mods(e) });
       e.preventDefault();
     });
     const keyItem = (e, evType) => ({
@@ -3239,6 +3245,27 @@ function defaultWispUrl() {
   }
   return "";
 }
+var RES_PREFS_PATH = "browser/defaults/preferences/zz-firefox-html-resolution.js";
+var RES_PRESS_HANDLER = `(() => {
+  const open = new Set();
+  addEventListener('popupshown', (e) => { if (e.originalTarget.localName !== 'tooltip') open.add(e.originalTarget); }, true);
+  addEventListener('popuphidden', (e) => open.delete(e.originalTarget), true);
+  window.__fhtmlPress = (x, y, button) => {
+    for (const p of [...open]) if (!p.isConnected || p.state !== 'open') open.delete(p);
+    if (!open.size) return 'none';
+    const sx = x + mozInnerScreenX, sy = y + mozInnerScreenY;
+    const hit = (p) => { const r = p.getOuterScreenRect(); return sx >= r.left && sx < r.right && sy >= r.top && sy < r.bottom; };
+    const autohide = [...open].filter((p) => p.getAttribute('noautohide') !== 'true');
+    if (autohide.length && ![...open].some(hit)) {
+      for (const p of autohide) p.hidePopup();
+      return 'closed';
+    }
+    windowUtils.sendNativeMouseEvent(Math.round(sx * devicePixelRatio), Math.round(sy * devicePixelRatio),
+      windowUtils.NATIVE_MOUSE_MESSAGE_BUTTON_DOWN, button, 0, null);
+    return 'native';
+  };
+  return 'ok';
+})()`;
 var RES_STEPS = [
   { name: "720p", width: 1280 },
   { name: "900p", width: 1600 },
@@ -3249,12 +3276,15 @@ var RES_STEPS = [
 ];
 var resStops = [{ name: "Current", width: 0 }];
 var resApplied = 0;
+var userGpu = false;
 var launched = false;
 var pageW = () => Math.max(1, innerWidth);
 var pageH = () => Math.max(1, innerHeight);
+var screenW = () => Math.round(pageW() * (devicePixelRatio || 1));
+var geckoScale = (s) => 60 / Math.max(1, Math.round(60 / s));
 function resSize(width) {
-  const w = width || pageW();
-  return { width: w, height: Math.max(1, Math.round(w * pageH() / pageW())), scale: w / pageW() };
+  const scale = width ? geckoScale(width / pageW()) : 1;
+  return { scale, width: Math.round(pageW() * scale), height: Math.round(pageH() * scale) };
 }
 function resIndexFor(width) {
   let best = 0;
@@ -3263,30 +3293,47 @@ function resIndexFor(width) {
   });
   return best;
 }
+var resAppliedIndex = () => env.webgl2 ? resIndexFor(resApplied) : 0;
+function syncResGpu() {
+  const forced = resAppliedIndex() !== 0;
+  optGpu.checked = env.webgl2 && (forced || userGpu);
+  optGpu.disabled = !env.webgl2 || forced || launched;
+  $("gpu-forced").hidden = !forced;
+}
 function renderRes() {
   const i = Number(optRes.value);
   const { name, width: stepWidth } = resStops[i] || resStops[0];
-  const { width, height, scale } = resSize(stepWidth);
-  const pending = i !== resIndexFor(resApplied);
+  const { width, height } = resSize(stepWidth);
+  const sw = screenW();
+  const pending = i !== resAppliedIndex();
   const out = $("res-value");
   const label = document.createElement("b");
   label.textContent = name;
   out.replaceChildren(label, ` ${width} \xD7 ${height}`);
-  if (scale > 1) out.append(`, interface at ${Math.round(100 / scale)}%`);
+  if (Math.abs(width - sw) <= sw * 0.02) out.append(", matches your screen (sharpest)");
+  else if (width > sw) out.append(width / sw < 1.095 ? ", just above your screen" : `, ${(width / sw).toFixed(1)}\xD7 your screen's pixels`);
   if (pending) out.append(Object.assign(document.createElement("em"), { textContent: " (not applied)" }));
+  else if (!env.webgl2 && resStops.length > 1) out.append(" (higher steps need WebGL2, which this browser lacks)");
   resApply.disabled = resCancel.disabled = !pending || optRes.disabled;
 }
 function layoutRes(selectedWidth) {
-  resStops = [{ name: "Current", width: 0 }, ...RES_STEPS.filter((s) => s.width >= pageW() * 1.05)];
+  const steps = RES_STEPS.filter((s) => s.width >= pageW() * 1.05);
+  const sw = screenW();
+  if (sw >= pageW() * 1.05 && !steps.some((s) => Math.abs(s.width - sw) <= sw * 0.02)) {
+    steps.push({ name: "Native", width: sw });
+    steps.sort((a, b) => a.width - b.width);
+  }
+  resStops = [{ name: "Current", width: 0 }, ...steps];
   optRes.max = String(resStops.length - 1);
-  optRes.disabled = resStops.length < 2;
+  optRes.disabled = resStops.length < 2 || !env.webgl2;
   $("res-stops").replaceChildren(...resStops.map((s, i) => Object.assign(document.createElement("option"), { value: String(i), label: s.name })));
-  optRes.value = String(resIndexFor(selectedWidth));
+  optRes.value = String(env.webgl2 ? resIndexFor(selectedWidth) : 0);
   renderRes();
 }
 function setupRes(saved) {
   resApplied = Number(saved.res) || 0;
   layoutRes(resApplied);
+  syncResGpu();
   optRes.addEventListener("input", renderRes);
   resApply.addEventListener("click", () => {
     resApplied = resStops[Number(optRes.value)].width;
@@ -3294,9 +3341,10 @@ function setupRes(saved) {
     o.res = resApplied;
     saveOpts(o);
     renderRes();
+    syncResGpu();
   });
   resCancel.addEventListener("click", () => {
-    optRes.value = String(resIndexFor(resApplied));
+    optRes.value = String(resAppliedIndex());
     renderRes();
   });
   let t;
@@ -3462,12 +3510,14 @@ async function main() {
   optStart.value = saved.start ?? "";
   optJit.checked = saved.jit ?? false;
   optQuiet.checked = saved.quiet ?? true;
-  setupRes(saved);
   $("build-info").textContent = `Gecko ${manifest.build.geckoVersion} (HeyPuter/firefox @ ${manifest.build.geckoCommit.slice(0, 10)}), firefox-wasm @ ${manifest.build.firefoxWasmCommit.slice(0, 10)}, emscripten ${manifest.build.emscripten}, built ${manifest.build.date}`;
   setPhase("checking");
   await runChecks();
-  optGpu.checked = env.webgl2 && (saved.gpu ?? false);
-  optGpu.disabled = !env.webgl2;
+  userGpu = saved.gpu ?? false;
+  optGpu.addEventListener("change", () => {
+    if (!optGpu.disabled) userGpu = optGpu.checked;
+  });
+  setupRes(saved);
   if ((env.threads.ok || env.coop) && env.jspi) {
     void refreshWisp();
     let wispTimer;
@@ -3499,18 +3549,19 @@ async function launch() {
   launched = true;
   launchBtn.disabled = true;
   launchBtn.querySelector("span").textContent = "Starting Firefox";
-  optRes.value = String(resIndexFor(resApplied));
+  optRes.value = String(resAppliedIndex());
+  const useGpu = optGpu.checked;
   for (const el of [optGpu, optJit, optWisp, optStart, optQuiet, optRes]) el.disabled = true;
   renderRes();
   setPhase("booting");
-  const opts = { gpu: optGpu.checked, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, res: resApplied };
+  const opts = { gpu: userGpu, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, res: resApplied };
   saveOpts(opts);
   if (opts.quiet) {
     addVirtualFile(decoded.chromeIndex, QUIET_PREFS_PATH, QUIET_PREFS);
     console.log(`[firefox.html] background Mozilla calls blocked via /gre/${QUIET_PREFS_PATH}`);
   }
   const engineEnv = { GECKO_CHROME: "1" };
-  if (opts.gpu) Object.assign(engineEnv, { GECKO_GPU: "1", GECKO_GL_PASSTHROUGH: "1", GECKO_WR_DIRECT: "1", GECKO_APZ: "1" });
+  if (useGpu) Object.assign(engineEnv, { GECKO_GPU: "1", GECKO_GL_PASSTHROUGH: "1", GECKO_WR_DIRECT: "1", GECKO_APZ: "1" });
   if (!opts.jit) engineEnv.GECKO_NOWASMJIT = "1";
   if (!env.opfs) engineEnv.GECKO_SKIP_OPFS = "1";
   if (env.coop) engineEnv.GECKO_COARSE_CLOCK = "0";
@@ -3525,11 +3576,20 @@ async function launch() {
     window.__coop = coop;
     console.log("[firefox.html] single-thread mode: engine threads run cooperatively on the page thread");
   }
-  const res = resSize(resStops[resIndexFor(resApplied)].width);
+  const res = resSize(resStops[resAppliedIndex()].width);
   const engineSize = () => [Math.round(pageW() * res.scale), Math.round(pageH() * res.scale)];
   const [engineW, engineH] = engineSize();
+  if (res.scale !== 1) {
+    addVirtualFile(
+      decoded.chromeIndex,
+      RES_PREFS_PATH,
+      `// Added by firefox.html: Options > Resolution.
+pref("layout.css.devPixelsPerPx", "${res.scale}");
+`
+    );
+  }
   fitScreen(engineW);
-  console.log(`[firefox.html] resolution ${engineW}x${engineH}` + (res.scale !== 1 ? ` (page ${pageW()}x${pageH()}, x${res.scale.toFixed(2)})` : ""));
+  console.log(`[firefox.html] resolution ${engineW}x${engineH}` + (res.scale !== 1 ? ` (${res.scale.toFixed(3)} device pixels per CSS pixel)` : ""));
   const t0 = performance.now();
   const gecko = new Gecko({
     canvas,
@@ -3544,10 +3604,15 @@ async function launch() {
     printErr: (s) => console.warn("[gecko]", s)
   });
   window.gecko = gecko;
+  gecko.cssScale = res.scale;
   try {
     await gecko.init();
     console.log(`[firefox.html] engine initialized in ${((performance.now() - t0) / 1e3).toFixed(1)} s`);
     await gecko.load(BROWSER_CHROME_URL);
+    if (res.scale !== 1) {
+      const r = await gecko.evalChrome(RES_PRESS_HANDLER);
+      if (r !== "ok") console.warn("[firefox.html] resolution: popup press handler not installed:", r);
+    }
     console.log(`[firefox.html] Firefox front-end booted in ${((performance.now() - t0) / 1e3).toFixed(1)} s`);
     await gecko.evalChrome(`setToolbarVisibility(document.getElementById('PersonalToolbar'), 'never'); 'ok'`).catch(() => {
     });
@@ -3573,7 +3638,7 @@ async function launch() {
     canvas.focus();
     window.geckoLoad = (u) => gecko.load(u);
     window.geckoEvalChrome = (js) => gecko.evalChrome(js);
-    window.__firefoxHtml = { booted: true, bootSeconds: (performance.now() - t0) / 1e3, gpu: opts.gpu, resolution: { width: engineW, height: engineH, scale: res.scale } };
+    window.__firefoxHtml = { booted: true, bootSeconds: (performance.now() - t0) / 1e3, gpu: useGpu, resolution: { width: engineW, height: engineH, scale: res.scale } };
     const resizeEngine = () => {
       const [w, h] = engineSize();
       fitScreen(w);

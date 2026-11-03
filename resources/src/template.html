@@ -112,6 +112,7 @@ details.options summary::-webkit-details-marker { display: none; }
 .res-actions button { padding: 6px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: 600 13px system-ui, sans-serif; cursor: pointer; }
 .res-actions #res-apply { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .res-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.opt-grid small.forced { color: var(--warn); margin-top: 2px; }
 
 #launch { display: inline-flex; gap: 10px; align-items: center; justify-content: center; padding: 12px 22px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font: 600 15px system-ui, sans-serif; cursor: pointer; align-self: flex-start; }
 #launch:disabled { opacity: .45; cursor: not-allowed; }
@@ -173,7 +174,7 @@ body.res-scaled #screen, body.res-scaled #popup-overlay, body.res-scaled [data-l
         <div class="opt-grid">
           <div class="field">
             <span>Resolution</span>
-            <small>Gives Firefox a bigger screen, shown scaled to fit this page. Above Current, text and buttons get smaller and more fits on screen, like a higher monitor resolution, and on a high-DPI display they also get sharper. Higher resolutions take longer to draw.</small>
+            <small>How many pixels Firefox is drawn with. Everything stays the same size; text, images and edges get sharper. The step that matches your screen is the sharpest it gets; higher steps smooth edges a little more but take longer to draw. Above Current, GPU acceleration turns on, since it is what draws the extra pixels.</small>
             <input type="range" id="opt-res" min="0" max="0" step="1" value="0" list="res-stops" aria-label="Resolution" aria-describedby="res-value">
             <datalist id="res-stops"></datalist>
             <div class="res-row">
@@ -184,7 +185,7 @@ body.res-scaled #screen, body.res-scaled #popup-overlay, body.res-scaled [data-l
               </div>
             </div>
           </div>
-          <label class="toggle"><input type="checkbox" id="opt-gpu"><span><b>GPU acceleration</b><small>WebRender through your browser's WebGL2: smoother scrolling and animation. Off by default because in testing it drew &lt;canvas&gt; content on web pages with red and blue swapped (images, text and CSS were correct).</small></span></label>
+          <label class="toggle"><input type="checkbox" id="opt-gpu"><span><b>GPU acceleration</b><small>WebRender through your browser's WebGL2: smoother scrolling and animation. Off by default because in testing it drew &lt;canvas&gt; content on web pages with red and blue swapped (images, text and CSS were correct).</small><small id="gpu-forced" class="forced" hidden>On because Resolution is above Current.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-quiet"><span><b>Block Firefox's background calls to Mozilla</b><small>Like desktop Firefox, the engine contacts Remote Settings and a region service on its own. On by default: these Firefox prefs keep it local. Sites you open are unaffected.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-jit"><span><b>Experimental JS to WASM JIT</b><small>Upstream marks it unusable on many sites. Off by default.</small></span></label>
           <label class="field"><span>WISP server</span><small>WebSocket relay that Gecko's network stack (Necko) tunnels TCP through. Browsers cannot open raw sockets, so websites load through this relay. HTTPS stays encrypted end to end (Gecko does the encryption); plain HTTP pages are visible to the relay. Change it to use another relay, or clear it to load only local pages.</small><input type="text" id="opt-wisp" spellcheck="false" autocomplete="off"></label>

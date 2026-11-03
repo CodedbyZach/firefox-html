@@ -206,7 +206,7 @@ const embeddedAssetsPlugin = {
   },
 };
 // Pack-time patches to the upstream loader: the single-thread repaint policy
-// (coop-loader.mjs) and wheel scrolling at the Resolution option's sizes (resolution-loader.mjs).
+// (coop-loader.mjs) and CSS-pixel input for the Resolution option (resolution-loader.mjs).
 const coopLoaderPlugin = {
   name: 'firefox-html-coop-loader',
   setup(b) {
@@ -234,7 +234,9 @@ const bundle = await build({
 let appJs = bundle.outputFiles[0].text;
 if (!appJs.includes('READY cmd=')) throw new Error('bundled loader does not contain gecko.js/js/index.ts');
 if (!appJs.includes('coopFrameHash')) throw new Error('bundled loader is missing the single-thread repaint patch');
-if (!appJs.includes('e.deltaY * (this.H / r.height)')) throw new Error('bundled loader is missing the resolution wheel patch');
+if (!appJs.includes('__fhtmlPress') || !appJs.includes('/ this.cssScale') || !appJs.includes('e.deltaY * this.cssScale')) {
+  throw new Error('bundled loader is missing the Resolution patches');
+}
 appJs = appJs.replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\!--');
 
 // --- 3. assemble firefox.html ---------------------------------------------------
