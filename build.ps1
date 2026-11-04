@@ -1,17 +1,17 @@
 <#
-  build.ps1: build firefox.html (the real Gecko engine compiled to WebAssembly, packed into one HTML
+  build.ps1: build proxyfox.html (the real Gecko engine compiled to WebAssembly, packed into one HTML
   file).
 
   Windows: Gecko's WebAssembly build only runs on Linux, so this script runs build.sh inside
-  WSL 2 (Ubuntu 24.04) and copies firefox.html back next to this script.
+  WSL 2 (Ubuntu 24.04) and copies proxyfox.html back next to this script.
   Linux (PowerShell 7): it runs build.sh directly.
 
     powershell -ExecutionPolicy Bypass -File .\build.ps1          all stages (deps, clone, engine, pack)
-    powershell -ExecutionPolicy Bypass -File .\build.ps1 pack     re-pack firefox.html from an existing build
+    powershell -ExecutionPolicy Bypass -File .\build.ps1 pack     re-pack proxyfox.html from an existing build
 
   Stages: all, deps, clone, engine, pack.
   -WispUrl wss://relay.example.com/  bakes another default WISP relay (for websites) into
-                                     firefox.html. Without it the default is wss://itcode.vip/api/.
+                                     proxyfox.html. Without it the default is wss://itcode.vip/api/.
 #>
 [CmdletBinding()]
 param(
@@ -24,7 +24,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Html = Join-Path $Here 'firefox.html'
+$Html = Join-Path $Here 'proxyfox.html'
 $OnWindows = ($env:OS -eq 'Windows_NT')
 
 function Write-Step([string]$Text) { Write-Host ''; Write-Host "==> $Text" -ForegroundColor Cyan }
@@ -95,7 +95,7 @@ $wispEnv = if ($WispUrl) { 'WISP_URL=' + (ConvertTo-BashLiteral $WispUrl) + ' ' 
 Invoke-Wsl "cd $LinuxDir && $wispEnv./build.sh $Stage"
 
 if ($Stage -eq 'all' -or $Stage -eq 'pack') {
-  Write-Step "Copying firefox.html back to $Here"
-  Invoke-Wsl "cp $LinuxDir/firefox.html $src/firefox.html"
-  Write-Host ("firefox.html: {0:N0} bytes, ready to hand out." -f (Get-Item -LiteralPath $Html).Length) -ForegroundColor Green
+  Write-Step "Copying proxyfox.html back to $Here"
+  Invoke-Wsl "cp $LinuxDir/proxyfox.html $src/proxyfox.html"
+  Write-Host ("proxyfox.html: {0:N0} bytes, ready to hand out." -f (Get-Item -LiteralPath $Html).Length) -ForegroundColor Green
 }

@@ -2,7 +2,7 @@
   "name": "firefox-single-html",
   "private": true,
   "type": "module",
-  "description": "Packs the firefox-wasm (Gecko -> WebAssembly) build into one self-contained firefox.html",
+  "description": "Packs the firefox-wasm (Gecko -> WebAssembly) build into one self-contained proxyfox.html",
   "devDependencies": {
     "@mercuryworkshop/wisp-js": "0.4.1",
     "esbuild": "0.25.12",

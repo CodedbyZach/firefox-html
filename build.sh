@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build firefox.html on Linux: the real Gecko engine (HeyPuter/firefox-wasm) compiled to
+# Build proxyfox.html on Linux: the real Gecko engine (HeyPuter/firefox-wasm) compiled to
 # WebAssembly with emscripten 6.0.1, then packed into ONE HTML file next to this script.
 # On Windows, run build.ps1 instead (it runs this script inside WSL 2).
 #
@@ -12,10 +12,10 @@
 #   ./build.sh clone      clone firefox-wasm at the pinned commit into work/
 #   ./build.sh engine     upstream build: make emsdk firefox vendor, apply resources/patches,
 #                         make web, make chrome-assets
-#   ./build.sh pack       resources/pack.mjs -> firefox.html
+#   ./build.sh pack       resources/pack.mjs -> proxyfox.html
 #
 # Environment: REPO (existing firefox-wasm checkout), FIREFOX_WASM_REF, and WISP_URL (the default
-# WISP relay baked into firefox.html; wss://itcode.vip/api/ when unset, WISP_URL= for none).
+# WISP relay baked into proxyfox.html; wss://itcode.vip/api/ when unset, WISP_URL= for none).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -118,7 +118,7 @@ EOF
   ulimit -s unlimited 2>/dev/null || ulimit -s 524288 2>/dev/null || true
 }
 
-# The firefox.html engine patches (resources/patches): single-thread mode, so the page
+# The proxyfox.html engine patches (resources/patches): single-thread mode, so the page
 # runs Gecko when it cannot share memory with Workers (a file opened from disk).
 #   firefox-wasm.patch: cooperative pthread runtime (src/coop-threads.c, lib/coop-threads.js),
 #                       wasm-native setjmp/longjmp wrappers (gen-coop-sjlj.py), command-loop wakeup
@@ -139,7 +139,7 @@ engine() {
   (cd "$REPO" && rustup override set "$RUST_VERSION" >/dev/null)
   step "emsdk 6.0.1 (+ WasmFS WISP/provider patches), Gecko fork checkout, Rust std vendoring"
   make -C "$REPO" emsdk firefox vendor
-  step "firefox.html engine patches (single-thread mode)"
+  step "proxyfox.html engine patches (single-thread mode)"
   apply_patch "$REPO" "$RES/patches/firefox-wasm.patch"
   apply_patch "$REPO/firefox" "$RES/patches/gecko.patch"
   step "make web (Gecko -> libxul -> gecko.{js,wasm,data}; hours)"
@@ -157,8 +157,8 @@ engine() {
 pack() {
   node_ok || die "Node.js 18+ is required (./build.sh deps installs it)"
   [ -d "$RES/node_modules/esbuild" ] || (cd "$RES" && npm install --no-audit --no-fund)
-  step "pack -> $HERE/firefox.html"
-  node "$RES/pack.mjs" --repo "$REPO" --out "$HERE/firefox.html"
+  step "pack -> $HERE/proxyfox.html"
+  node "$RES/pack.mjs" --repo "$REPO" --out "$HERE/proxyfox.html"
 }
 
 case "${1:-all}" in
