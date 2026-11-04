@@ -439,7 +439,10 @@ async function runChecks() {
         : `Blocked: ${env.threads.why}`);
 
   env.opfs = await checkOpfs();
-  setCheck('storage', env.opfs ? 'ok' : 'warn', env.opfs ? 'OPFS available: cookies and site data persist between visits' : 'OPFS blocked here: profile is kept in memory for this session only');
+  setCheck('storage', env.opfs && !env.coop ? 'ok' : 'warn',
+    !env.opfs ? 'OPFS blocked here: profile is kept in memory for this session only'
+      : env.coop ? 'Single-thread mode keeps the profile in memory for this session only (saving it needs Workers)'
+        : 'OPFS available: cookies and site data persist between visits');
 
   env.webgl2 = checkWebGL2();
   setCheck('webgl', env.webgl2 ? 'ok' : 'warn', env.webgl2 ? 'WebGL2 + OffscreenCanvas available' : 'Not available: software rendering only');
@@ -529,8 +532,10 @@ async function launch() {
   if (useGpu) Object.assign(engineEnv, { GECKO_GPU: '1', GECKO_GL_PASSTHROUGH: '1', GECKO_WR_DIRECT: '1', GECKO_APZ: '1' });
   if (!opts.jit) engineEnv.GECKO_NOWASMJIT = '1';
   // Without OPFS (file:// pages) the native OPFS backend cannot start; this
-  // documented engine switch keeps the profile on the in-memory WasmFS instead.
-  if (!env.opfs) engineEnv.GECKO_SKIP_OPFS = '1';
+  // documented engine switch keeps the profile on the in-memory WasmFS instead. The same
+  // in single-thread mode: OPFS writes need a real Worker (in testing every profile write
+  // failed with all threads on the page), so the profile stays in memory there too.
+  if (!env.opfs || env.coop) engineEnv.GECKO_SKIP_OPFS = '1';
   // Single-thread mode: the coarse clock word is refreshed by a page-thread timer, which
   // cannot run while an engine thread does, so Gecko would see time stand still.
   if (env.coop) engineEnv.GECKO_COARSE_CLOCK = '0';

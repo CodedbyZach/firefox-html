@@ -6,17 +6,18 @@ Double-click it: Firefox starts inside the page. Nothing to install, run or serv
 
 | File | Purpose |
 | --- | --- |
-| `firefox.html` | The single-file browser (80,257,811 bytes). |
+| `firefox.html` | The single-file browser (80,257,963 bytes). |
 | `build.sh` | Reproducible build on Linux (Ubuntu 24.04). |
 | `build.ps1` | The same build from PowerShell. On Windows it runs `build.sh` inside WSL 2; on Linux it calls it directly. |
 | `resources/` | What the build scripts use: the packer, the page source (`src/`) and the engine patches (`patches/`). |
+| `index.html` | The site's front page on GitHub Pages: opens `firefox.html`. |
 
 ## Report
 
 | Question | Answer |
 | --- | --- |
 | Did the real Firefox engine build? | Yes. Gecko 153.0a1 compiled with emscripten 6.0.1 and Rust 1.95.0, plus the two patches in `resources/patches`. Build ID `20261103131955`. |
-| Final HTML size | 80,257,811 bytes (76.5 MiB). |
+| Final HTML size | 80,257,963 bytes (76.5 MiB). |
 | Does it work from `file://`? | Yes. Opened from disk with no browser flags, Firefox boots in about 5 to 7 s (Chrome 153). |
 | Does it require a local server? | No. Served from a web server it also works, with or without the two COOP/COEP headers. With them it uses real multi-threading. |
 | Which features work? | See "Tested" below. |
@@ -44,6 +45,18 @@ build doesn't use Workers at all:
 When the page *is* cross-origin isolated (served with the two headers), the same file uses real Workers
 on all CPU cores instead.
 
+## Hosting it on a website
+
+Multi-threading needs two response headers on `firefox.html`:
+`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`.
+
+- **Apache/cPanel:** set them in `.htaccess`.
+- **GitHub Pages** (which can't send headers) **behind Cloudflare:** proxy the DNS record (orange
+  cloud), keep SSL/TLS on Full, and add a Response Header Transform Rule for the hostname that sets
+  both headers. `index.html` sends the site's root to `firefox.html`.
+- **Neither:** it still works, single-threaded, with the profile kept in memory. Opened as a file
+  (shared on Discord, say), it is always single-threaded.
+
 ## Tested
 
 Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line flags, so not cross-origin isolated:
@@ -63,6 +76,7 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
 - **GPU mode** (off by default): works, with the same `<canvas>` red/blue swap as in the served build.
 - **Served with COOP/COEP** (multi-threaded): boots with 42 Workers, `about:robots` loads, 0 console
   errors.
+- **Served without headers, like GitHub Pages:** single-threaded, the profile kept in memory, 0 errors.
 - **Resolution** (Options, Current up to 4K): Firefox keeps its size and is drawn with more pixels
   (Gecko's device pixel ratio set to the step). On a 125% display, 1080p is 1:1 with the screen and
   visibly sharper than Current; 4K is supersampled. At 1080p, 1440p and 4K it booted in 7 to 9 s, and
@@ -75,7 +89,8 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
 - Slower than the multi-threaded mode, because everything shares one CPU core.
 - The New Tab page is blank.
 - From `file://` the profile lives in memory (browser storage for files is limited), so cookies and
-  history are gone after a reload. Served over http(s), the profile is stored in OPFS.
+  history are gone after a reload. On a website running multi-threaded, the profile is stored in OPFS;
+  single-threaded it stays in memory too (OPFS writes need a real Worker).
 - File pickers, Save As and playback-speed changes are stubbed out in this engine build.
 - Resolution above Current turns on GPU rendering, with its `<canvas>` color swap: this engine build's
   software renderer paints one pixel per CSS pixel at any pixel ratio (`embed-paint.cpp`). Without
