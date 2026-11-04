@@ -439,7 +439,10 @@ async function runChecks() {
         : `Blocked: ${env.threads.why}`);
 
   env.opfs = await checkOpfs();
-  setCheck('storage', env.opfs ? 'ok' : 'warn', env.opfs ? 'OPFS available: cookies and site data persist between visits' : 'OPFS blocked here: profile is kept in memory for this session only');
+  setCheck('storage', env.opfs && !env.coop ? 'ok' : 'warn',
+    !env.opfs ? 'OPFS blocked here: profile is kept in memory for this session only'
+      : env.coop ? 'Single-thread mode keeps the profile in memory for this session only (saving it needs Workers)'
+        : 'OPFS available: cookies and site data persist between visits');
 
   env.webgl2 = checkWebGL2();
   setCheck('webgl', env.webgl2 ? 'ok' : 'warn', env.webgl2 ? 'WebGL2 + OffscreenCanvas available' : 'Not available: software rendering only');
@@ -466,7 +469,43 @@ async function refreshWisp() {
   setCheck('wisp', r.ok ? 'ok' : 'warn', r.ok ? `Reachable: http(s) sites load through ${url}` : `${url} is not reachable or not allowed (${r.why}). Sites will fail to load until a WISP server accepts this page.`);
 }
 
+// Websites that can't send the COOP/COEP headers (GitHub Pages): coi-sw.js, next to this
+// file, adds them to the site's responses, so after one reload the page is cross-origin
+// isolated and Gecko's threads run on Workers on every core. Without that file, on a
+// double-clicked file (no service workers there) or where the headers already arrive,
+// nothing changes. A page the helper already serves but that is still not isolated is
+// left single-threaded, since reloading would not help; a page it doesn't serve yet (the
+// first visit, or a hard reload, which bypasses service workers) reloads, at most once a
+// minute. The time is kept in localStorage: an isolated page and a non-isolated one of the
+// same tab don't share sessionStorage.
+const COI_RELOAD_KEY = 'firefox-html-coi-reload';
+async function isolateWithServiceWorker() {
+  const local = (f) => { try { return f(localStorage); } catch { return null; } };
+  if (self.crossOriginIsolated) {
+    local((s) => s.removeItem(COI_RELOAD_KEY));
+    return false;
+  }
+  if (!/^https?:$/.test(location.protocol) || !window.isSecureContext || !navigator.serviceWorker) return false;
+  try {
+    await navigator.serviceWorker.register('coi-sw.js', { scope: './' });
+  } catch (e) {
+    console.log('[firefox.html] no coi-sw.js on this site, so Gecko runs single-threaded here:', e.message);
+    return false;
+  }
+  const last = Number(local((s) => s.getItem(COI_RELOAD_KEY))) || 0;
+  if (navigator.serviceWorker.controller || Date.now() - last < 60000) {
+    console.warn('[firefox.html] coi-sw.js is installed but this page is still not cross-origin isolated; staying single-threaded');
+    return false;
+  }
+  await navigator.serviceWorker.ready;
+  if (local((s) => (s.setItem(COI_RELOAD_KEY, String(Date.now())), true)) !== true) return false;
+  console.log('[firefox.html] coi-sw.js is active: reloading once for multi-threading');
+  location.reload();
+  return true;
+}
+
 async function main() {
+  if (await isolateWithServiceWorker()) return; // reloading
   const saved = loadOpts();
   // An empty saved value (e.g. from a build without a default relay) falls back to the default.
   optWisp.value = saved.wisp || defaultWispUrl();
@@ -529,8 +568,10 @@ async function launch() {
   if (useGpu) Object.assign(engineEnv, { GECKO_GPU: '1', GECKO_GL_PASSTHROUGH: '1', GECKO_WR_DIRECT: '1', GECKO_APZ: '1' });
   if (!opts.jit) engineEnv.GECKO_NOWASMJIT = '1';
   // Without OPFS (file:// pages) the native OPFS backend cannot start; this
-  // documented engine switch keeps the profile on the in-memory WasmFS instead.
-  if (!env.opfs) engineEnv.GECKO_SKIP_OPFS = '1';
+  // documented engine switch keeps the profile on the in-memory WasmFS instead. The same
+  // in single-thread mode: OPFS writes need a real Worker (in testing every profile write
+  // failed with all threads on the page), so the profile stays in memory there too.
+  if (!env.opfs || env.coop) engineEnv.GECKO_SKIP_OPFS = '1';
   // Single-thread mode: the coarse clock word is refreshed by a page-thread timer, which
   // cannot run while an engine thread does, so Gecko would see time stand still.
   if (env.coop) engineEnv.GECKO_COARSE_CLOCK = '0';
