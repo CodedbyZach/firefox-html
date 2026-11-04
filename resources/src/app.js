@@ -469,43 +469,7 @@ async function refreshWisp() {
   setCheck('wisp', r.ok ? 'ok' : 'warn', r.ok ? `Reachable: http(s) sites load through ${url}` : `${url} is not reachable or not allowed (${r.why}). Sites will fail to load until a WISP server accepts this page.`);
 }
 
-// Websites that can't send the COOP/COEP headers (GitHub Pages): coi-sw.js, next to this
-// file, adds them to the site's responses, so after one reload the page is cross-origin
-// isolated and Gecko's threads run on Workers on every core. Without that file, on a
-// double-clicked file (no service workers there) or where the headers already arrive,
-// nothing changes. A page the helper already serves but that is still not isolated is
-// left single-threaded, since reloading would not help; a page it doesn't serve yet (the
-// first visit, or a hard reload, which bypasses service workers) reloads, at most once a
-// minute. The time is kept in localStorage: an isolated page and a non-isolated one of the
-// same tab don't share sessionStorage.
-const COI_RELOAD_KEY = 'firefox-html-coi-reload';
-async function isolateWithServiceWorker() {
-  const local = (f) => { try { return f(localStorage); } catch { return null; } };
-  if (self.crossOriginIsolated) {
-    local((s) => s.removeItem(COI_RELOAD_KEY));
-    return false;
-  }
-  if (!/^https?:$/.test(location.protocol) || !window.isSecureContext || !navigator.serviceWorker) return false;
-  try {
-    await navigator.serviceWorker.register('coi-sw.js', { scope: './' });
-  } catch (e) {
-    console.log('[firefox.html] no coi-sw.js on this site, so Gecko runs single-threaded here:', e.message);
-    return false;
-  }
-  const last = Number(local((s) => s.getItem(COI_RELOAD_KEY))) || 0;
-  if (navigator.serviceWorker.controller || Date.now() - last < 60000) {
-    console.warn('[firefox.html] coi-sw.js is installed but this page is still not cross-origin isolated; staying single-threaded');
-    return false;
-  }
-  await navigator.serviceWorker.ready;
-  if (local((s) => (s.setItem(COI_RELOAD_KEY, String(Date.now())), true)) !== true) return false;
-  console.log('[firefox.html] coi-sw.js is active: reloading once for multi-threading');
-  location.reload();
-  return true;
-}
-
 async function main() {
-  if (await isolateWithServiceWorker()) return; // reloading
   const saved = loadOpts();
   // An empty saved value (e.g. from a build without a default relay) falls back to the default.
   optWisp.value = saved.wisp || defaultWispUrl();

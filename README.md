@@ -6,11 +6,10 @@ Double-click it: Firefox starts inside the page. Nothing to install, run or serv
 
 | File | Purpose |
 | --- | --- |
-| `firefox.html` | The single-file browser (80,259,217 bytes). |
+| `firefox.html` | The single-file browser (80,257,963 bytes). |
 | `build.sh` | Reproducible build on Linux (Ubuntu 24.04). |
 | `build.ps1` | The same build from PowerShell. On Windows it runs `build.sh` inside WSL 2; on Linux it calls it directly. |
 | `resources/` | What the build scripts use: the packer, the page source (`src/`) and the engine patches (`patches/`). |
-| `coi-sw.js` | Optional, for websites that can't send headers (GitHub Pages): next to `firefox.html`, it makes the page multi-threaded. See "Hosting it on a website". |
 | `index.html` | The site's front page on GitHub Pages: opens `firefox.html`. |
 
 ## Report
@@ -18,7 +17,7 @@ Double-click it: Firefox starts inside the page. Nothing to install, run or serv
 | Question | Answer |
 | --- | --- |
 | Did the real Firefox engine build? | Yes. Gecko 153.0a1 compiled with emscripten 6.0.1 and Rust 1.95.0, plus the two patches in `resources/patches`. Build ID `20261103131955`. |
-| Final HTML size | 80,259,217 bytes (76.5 MiB). |
+| Final HTML size | 80,257,963 bytes (76.5 MiB). |
 | Does it work from `file://`? | Yes. Opened from disk with no browser flags, Firefox boots in about 5 to 7 s (Chrome 153). |
 | Does it require a local server? | No. Served from a web server it also works, with or without the two COOP/COEP headers. With them it uses real multi-threading. |
 | Which features work? | See "Tested" below. |
@@ -43,20 +42,20 @@ build doesn't use Workers at all:
 - **Cheap when idle.** Repainting backs off when nothing on screen changes, and the engine's command
   loop sleeps until there is work.
 
-When the page *is* cross-origin isolated (served with the two headers, or on a website with
-`coi-sw.js` next to it), the same file uses real Workers on all CPU cores instead.
+When the page *is* cross-origin isolated (served with the two headers), the same file uses real Workers
+on all CPU cores instead.
 
 ## Hosting it on a website
 
-- **With headers** (Apache/cPanel, for example in `.htaccess`): send
-  `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` for
-  `firefox.html`, and Firefox runs on Workers on every core.
-- **Without headers** (GitHub Pages): put `coi-sw.js` next to `firefox.html`. On the first visit the page
-  installs it as a service worker and reloads once; from then on the service worker adds the two
-  headers itself. A hard reload, which bypasses service workers, reloads once more. `index.html` sends
-  the site's root to `firefox.html`.
+Multi-threading needs two response headers on `firefox.html`:
+`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`.
+
+- **Apache/cPanel:** set them in `.htaccess`.
+- **GitHub Pages** (which can't send headers) **behind Cloudflare:** proxy the DNS record (orange
+  cloud), keep SSL/TLS on Full, and add a Response Header Transform Rule for the hostname that sets
+  both headers. `index.html` sends the site's root to `firefox.html`.
 - **Neither:** it still works, single-threaded, with the profile kept in memory. Opened as a file
-  (shared on Discord, say), it is always single-threaded: service workers don't exist there.
+  (shared on Discord, say), it is always single-threaded.
 
 ## Tested
 
@@ -77,10 +76,7 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
 - **GPU mode** (off by default): works, with the same `<canvas>` red/blue swap as in the served build.
 - **Served with COOP/COEP** (multi-threaded): boots with 42 Workers, `about:robots` loads, 0 console
   errors.
-- **Served without headers, like GitHub Pages:** with `coi-sw.js` the first visit reloads once, then
-  Firefox boots on 43 to 50 Workers with its profile in OPFS and 0 errors; a second visit doesn't reload,
-  and a hard reload recovers with one reload. Without `coi-sw.js`: no reload, single-threaded, profile
-  in memory. With real headers the page never installs the service worker.
+- **Served without headers, like GitHub Pages:** single-threaded, the profile kept in memory, 0 errors.
 - **Resolution** (Options, Current up to 4K): Firefox keeps its size and is drawn with more pixels
   (Gecko's device pixel ratio set to the step). On a 125% display, 1080p is 1:1 with the screen and
   visibly sharper than Current; 4K is supersampled. At 1080p, 1440p and 4K it booted in 7 to 9 s, and
