@@ -2,22 +2,24 @@
 
 `firefox.html` is one file that contains the real Gecko engine and Firefox front-end from
 [HeyPuter/firefox-wasm](https://github.com/HeyPuter/firefox-wasm), built from source and embedded as Base64.
-Double-click it: Firefox starts inside the page. Nothing to install, run or serve.
+Double-click it: Firefox starts inside the page. Nothing to install, run or serve. On a website it can
+also be installed as an app that opens from the device.
 
 | File | Purpose |
 | --- | --- |
-| `firefox.html` | The single-file browser (80,268,403 bytes). |
+| `firefox.html` | The single-file browser (80,271,338 bytes). |
 | `build.sh` | Reproducible build on Linux (Ubuntu 24.04). |
 | `build.ps1` | The same build from PowerShell. On Windows it runs `build.sh` inside WSL 2; on Linux it calls it directly. |
 | `resources/` | What the build scripts use: the packer, the page source (`src/`) and the engine patches (`patches/`). |
 | `index.html` | The site's front page on GitHub Pages: opens `firefox.html`. |
+| `sw.js`, `manifest.webmanifest`, `icons/` | Make the website an installable app that opens from the device (see "Installing it as an app"). Not needed for the file. |
 
 ## Report
 
 | Question | Answer |
 | --- | --- |
 | Did the real Firefox engine build? | Yes. Gecko 153.0a1 compiled with emscripten 6.0.1 and Rust 1.95.0, plus the two patches in `resources/patches`. Build ID `20261103131955`. |
-| Final HTML size | 80,268,403 bytes (76.5 MiB). |
+| Final HTML size | 80,271,338 bytes (76.6 MiB). |
 | Does it work from `file://`? | Yes. Opened from disk with no browser flags, Firefox boots in about 5 to 7 s (Chrome 153). |
 | Does it require a local server? | No. Served from a web server it also works, with or without the two COOP/COEP headers. With them it uses real multi-threading. |
 | Which features work? | See "Tested" below. |
@@ -50,12 +52,31 @@ on all CPU cores instead.
 Multi-threading needs two response headers on `firefox.html`:
 `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`.
 
-- **Apache/cPanel:** set them in `.htaccess`.
+- **Apache/cPanel:** set them in `.htaccess` (and, for the app, `AddType application/manifest+json .webmanifest`).
 - **GitHub Pages** (which can't send headers) **behind Cloudflare:** proxy the DNS record (orange
   cloud), keep SSL/TLS on Full, and add a Response Header Transform Rule for the hostname that sets
   both headers. `index.html` sends the site's root to `firefox.html`.
 - **Neither:** it still works, single-threaded, with the profile kept in memory. Opened as a file
   (shared on Discord, say), it is always single-threaded.
+
+### Installing it as an app
+
+On the website `firefox.html` is also an installable app (PWA). `sw.js`, a service worker, keeps the
+77 MB file in the browser's Cache Storage, so after the first visit it opens from the device instead of
+being downloaded again, offline too.
+
+- **Install:** the launch page shows **Install app** when the browser offers it (Chrome and Edge), or
+  use the install icon in the address bar. The app opens in its own window.
+- **Updates:** every opening asks the site whether `firefox.html` changed, with a conditional request:
+  an unchanged file costs a "304 Not Modified" and no download. A new build downloads in the background
+  and opens next time; the launch page offers **Reload now**.
+- **Files:** `sw.js`, `manifest.webmanifest` and `icons/` sit next to `firefox.html`. The cached copy
+  keeps its COOP/COEP headers, so the app stays multi-threaded. Without these files (a lone
+  `firefox.html` on a site, or the file opened from disk) the page works as before and just isn't
+  installable.
+- **Changing `index.html`, the manifest or the icons:** rename `CACHE` in `sw.js` (say to
+  `firefox-html-app-v2`). The browser picks up the new `sw.js` a few seconds into the next opening and
+  caches the small files again; the `firefox.html` already on the device is carried over.
 
 ## Tested
 
@@ -87,6 +108,15 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
   swipe flings on, a tap still clicks, a drag that starts on a button doesn't click it, and the page
   around Firefox never moves. Tested with Chromium's real touch input from `file://` (also at a pixel
   ratio of 1.25 with GPU rendering) and served multi-threaded.
+- **App (PWA)**, served the way GitHub Pages behind Cloudflare serves it (ETag, Last-Modified,
+  `max-age=600`, COOP/COEP): Chrome reports it installable with no errors and fires its install prompt
+  (Install app appears and opens it). The first visit downloaded `firefox.html` once; the service
+  worker's copy came from the HTTP cache. Reopened, the page came from the device and the site only
+  answered one 304 (0 bytes): the HTML was read in 0.6 s, the launch page was ready in 2.6 s, still
+  cross-origin isolated, and Firefox booted with 39 Workers. With the server stopped, the site's root
+  still opened it. A changed `firefox.html` downloaded in the background while the old copy opened, and
+  Reload now opened the new build. A renamed `CACHE` took over within seconds without downloading
+  `firefox.html` again. From `file://` there is no manifest, service worker or Install button.
 - **Quitting** (Ctrl+Q, the menu's Exit, closing the last tab): a "Firefox closed" message counts down
   3 s, then the launch page comes back; "Keep browsing" cancels. Firefox stays loaded behind it, so
   Launch opens it again in about 60 ms with one fresh tab (three times in a row, no slowdown). A window
@@ -124,8 +154,11 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
 - Real websites (the build machine's network blocks them).
 - Audio and video.
 - `build.ps1` on real Windows. It was run under PowerShell 7 with a simulated WSL.
+- The app in a real desktop window (the build machine only runs headless Chromium), and the live
+  site's own 304 answers (it can't reach the site). A server that answers 200 anyway costs a moment of
+  download: the service worker stops it once it sees the same ETag.
 
-**Sharing on Discord:** the file is 76.5 MiB. Discord's upload limit without Nitro is 10 MB, so post it
+**Sharing on Discord:** the file is 76.6 MiB. Discord's upload limit without Nitro is 10 MB, so post it
 with Nitro (which allows larger uploads) or share a link from a file host. The engine alone is
 37 MB compressed, so a working build can't get under 10 MB.
 

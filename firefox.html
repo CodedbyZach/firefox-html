@@ -4,6 +4,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f4f3f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#131211" media="(prefers-color-scheme: dark)">
 <title>Firefox (Gecko WASM)</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e66000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'/%3E%3Cpath d='M2 12h20'/%3E%3C/svg%3E">
 <style>
@@ -128,6 +130,13 @@ details.options summary::-webkit-details-marker { display: none; }
 .quit-actions button:disabled { opacity: .45; cursor: default; }
 .quit-actions button[hidden] { display: none; }
 .relaunch-note { margin: -8px 0 0; color: var(--muted); font-size: 13.5px; }
+/* The website as an installable app (app.js "app"): Install button and update note. */
+.launch-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+#install-app { display: inline-flex; gap: 8px; align-items: center; padding: 11px 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); font: 600 15px system-ui, sans-serif; cursor: pointer; }
+#install-app[hidden] { display: none; }
+#install-app svg { width: 16px; height: 16px; }
+.app-update { margin: -8px 0 0; color: var(--muted); font-size: 13.5px; }
+.app-update button { margin-left: 6px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: 600 13px system-ui, sans-serif; cursor: pointer; }
 /* Firefox stays out of sight, and out of the way of clicks, while the launch page is shown
    (booting, or after a quit). GPU mode's loader shows its surfaces with inline styles. */
 body:not([data-phase="running"]) #screen, body:not([data-phase="running"]) [data-libxul-glwrap] { visibility: hidden; }
@@ -221,7 +230,11 @@ body.res-scaled #screen, body.res-scaled #popup-overlay, body.res-scaled [data-l
       </details>
     </section>
 
-    <button id="launch" disabled><svg class="i" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg><span>Launch Firefox</span></button>
+    <div class="launch-row">
+      <button id="launch" disabled><svg class="i" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg><span>Launch Firefox</span></button>
+      <button type="button" id="install-app" hidden><svg class="i" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>Install app</button>
+    </div>
+    <p id="app-update" class="app-update" hidden>A new version was downloaded; it opens next time.<button type="button" id="app-update-reload">Reload now</button></p>
     <p id="relaunch-note" class="relaunch-note" hidden>Firefox is still loaded, so Launch opens it again right away with a fresh tab. To change the options, reload this page.</p>
 
     <section class="card log-card">
@@ -3581,6 +3594,40 @@ function setupQuitDialog() {
 var engineOutput = (s) => {
   if (typeof s === "string" && s.includes(QUIT_MARK)) firefoxQuit(s.includes(`${QUIT_MARK} closed`) ? "closed" : "quit");
 };
+function setupApp() {
+  if (!/^https?:$/.test(location.protocol) || !window.isSecureContext || !navigator.serviceWorker) return;
+  const installed = () => matchMedia("(display-mode: standalone)").matches;
+  navigator.serviceWorker.register("sw.js").then(() => {
+    const manifestLink = document.createElement("link");
+    manifestLink.rel = "manifest";
+    manifestLink.href = "manifest.webmanifest";
+    document.head.append(manifestLink);
+    if (installed()) void navigator.storage?.persist?.();
+    console.log("[firefox.html] app: sw.js keeps this page on the device");
+  }, (e) => console.log("[firefox.html] app: no sw.js on this site, so it opens from the network:", e.message));
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (e.data?.type === "firefox-html-update") $("app-update").hidden = false;
+  });
+  $("app-update-reload").addEventListener("click", () => location.reload());
+  let install = null;
+  addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    install = e;
+    $("install-app").hidden = false;
+  });
+  $("install-app").addEventListener("click", async () => {
+    if (!install) return;
+    $("install-app").hidden = true;
+    install.prompt();
+    await install.userChoice.catch(() => {
+    });
+    install = null;
+  });
+  addEventListener("appinstalled", () => {
+    $("install-app").hidden = true;
+    void navigator.storage?.persist?.();
+  });
+}
 function takeBase64(name) {
   const el = document.querySelector(`script[data-asset="${CSS.escape(name)}"]`);
   if (!el) throw new Error(`firefox.html is missing the embedded asset "${name}"`);
@@ -3733,6 +3780,7 @@ async function refreshWisp() {
 }
 async function main() {
   setupQuitDialog();
+  setupApp();
   const saved = loadOpts();
   optWisp.value = saved.wisp || defaultWispUrl();
   optStart.value = saved.start ?? "";
