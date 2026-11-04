@@ -8,6 +8,7 @@ import { ZSTDDecoder } from 'zstddec';
 import { provideEngineAssets } from './embedded-assets.js';
 import { indexTar, makeTarProvider, REQUIRED_FILES } from './tar-fs.js';
 import { createCoop } from './coop.js';
+import { attachTouchScroll } from './touch.js';
 
 const $ = (id) => document.getElementById(id);
 const manifest = JSON.parse($('asset-manifest').textContent);
@@ -302,6 +303,105 @@ function fitScreen(engineWidth) {
   document.body.classList.toggle('res-scaled', engineWidth !== pageW());
 }
 
+// ------------------------------------------------------------------- quit --
+// Quitting Firefox (Ctrl+Q, the menu's Exit, closing the last tab, a restart) comes back to
+// this launch page. A real quit can't finish inside a page: the engine closes the browser
+// window and keeps running with nothing to show. So the chrome window answers quit requests
+// itself (QUIT_HANDLER, installed after boot) and Firefox stays loaded: the page says it
+// closed, shows the launch page again, and Launch then opens Firefox again at once, with a
+// fresh tab. That is also why the page doesn't reload for this: in single-thread mode a
+// reload doesn't free the old engine (its threads are suspended in the page), so every
+// launch after one got slower. Should the browser window really close some other way, the
+// engine can't show Firefox again, and the page reloads instead. The chrome code reaches the
+// page through dump(), which arrives on the engine's stdout (print below).
+const QUIT_MARK = '[firefox.html:quit]';
+const QUIT_HANDLER = `(() => {
+  const say = (how) => dump(${JSON.stringify(QUIT_MARK)} + ' ' + how + '\\n');
+  // Ctrl+Q and the menu's Exit (cmd_quitApplication): no "Quit Firefox?" prompt either.
+  window.goQuitApplication = () => { say('quit'); return false; };
+  // Everything else that asks to quit or restart, including closing the last tab.
+  Services.obs.addObserver((cancel) => {
+    cancel.QueryInterface(Ci.nsISupportsPRBool).data = true;
+    say('quit');
+  }, 'quit-application-requested');
+  addEventListener('unload', () => say('closed'));
+  return 'ok';
+})()`;
+// The fresh start the next Launch shows: popups closed, one new tab (or "Open after launch").
+const freshStart = (start) => `(() => {
+  for (const p of document.querySelectorAll('panel, menupopup')) if (p.state === 'open' || p.state === 'showing') p.hidePopup();
+  const tab = gBrowser.addTrustedTab(${JSON.stringify(start || '')} || BROWSER_NEW_TAB_URL);
+  gBrowser.selectedTab = tab;
+  for (const t of [...gBrowser.tabs]) if (t !== tab) gBrowser.removeTab(t, { animate: false, skipPermitUnload: true });
+  return String(gBrowser.tabs.length);
+})()`;
+const QUIT_SECONDS = 3;
+
+let firefox = null; // the running engine, once booted: { gecko, start }
+let quitTimer = 0;
+let quitHow = '';
+
+function showFirefox() {
+  canvas.classList.add('ready');
+  splash.classList.add('done');
+  setPhase('running');
+  scrollTo(0, 0); // the page may have been scrolled down to the Launch button
+  canvas.focus();
+}
+// After a quit: the launch page again, with Firefox loaded behind it and reset to a fresh tab.
+async function backToLaunchPage() {
+  clearInterval(quitTimer);
+  quitTimer = 0;
+  if (quitHow === 'closed' || !firefox) {
+    $('quit-text').textContent = 'Going back to the launch page.';
+    for (const b of [$('quit-stay'), $('quit-now')]) b.disabled = true;
+    location.reload();
+    return;
+  }
+  $('quit').hidden = true;
+  canvas.classList.remove('ready');
+  splash.classList.remove('done');
+  setPhase('ready');
+  launchBtn.querySelector('span').textContent = 'Launch Firefox';
+  launchBtn.disabled = false;
+  $('relaunch-note').hidden = false;
+  launchBtn.focus();
+  const r = await firefox.gecko.evalChrome(freshStart(firefox.start)).catch((e) => String(e));
+  console.log(`[firefox.html] back at the launch page; Firefox stays loaded (fresh start: ${r} tab)`);
+}
+function keepBrowsing() {
+  clearInterval(quitTimer);
+  quitTimer = 0;
+  $('quit').hidden = true;
+  canvas.focus();
+}
+// how: 'quit' (Firefox is still open, so it can be kept) or 'closed' (its window is gone).
+function firefoxQuit(how) {
+  if (how === 'closed') quitHow = 'closed'; // for good: this engine can't show Firefox again
+  else if (quitHow !== 'closed') quitHow = 'quit';
+  $('quit-stay').hidden = quitHow === 'closed';
+  if (quitTimer) return; // already counting down
+  if (quitHow === 'quit' && document.body.dataset.phase !== 'running') return; // not on screen
+  let left = QUIT_SECONDS;
+  const say = () => { $('quit-text').textContent = `Back to the launch page in ${left} s.`; };
+  say();
+  for (const b of [$('quit-stay'), $('quit-now')]) b.disabled = false;
+  $('quit').hidden = false;
+  $('quit-now').focus();
+  quitTimer = setInterval(() => (--left > 0 ? say() : void backToLaunchPage()), 1000);
+  console.log(`[firefox.html] Firefox ${how === 'closed' ? 'window closed' : 'quit'}: back to the launch page`);
+}
+function setupQuitDialog() {
+  $('quit-now').addEventListener('click', () => void backToLaunchPage());
+  $('quit-stay').addEventListener('click', keepBrowsing);
+  $('quit').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('quit-stay').hidden) keepBrowsing();
+  });
+}
+const engineOutput = (s) => {
+  if (typeof s === 'string' && s.includes(QUIT_MARK)) firefoxQuit(s.includes(`${QUIT_MARK} closed`) ? 'closed' : 'quit');
+};
+
 // ------------------------------------------------------------ asset decode --
 function takeBase64(name) {
   const el = document.querySelector(`script[data-asset="${CSS.escape(name)}"]`);
@@ -470,6 +570,7 @@ async function refreshWisp() {
 }
 
 async function main() {
+  setupQuitDialog();
   const saved = loadOpts();
   // An empty saved value (e.g. from a build without a default relay) falls back to the default.
   optWisp.value = saved.wisp || defaultWispUrl();
@@ -508,7 +609,12 @@ async function main() {
     $('engine-proof').hidden = false;
     void proveEngine();
   }
-  launchBtn.onclick = () => void launch();
+  // After a quit Firefox is still loaded (see "quit"): Launch shows it again at once.
+  launchBtn.onclick = () => {
+    if (!firefox) return void launch();
+    $('relaunch-note').hidden = true;
+    showFirefox();
+  };
 }
 
 async function launch() {
@@ -576,15 +682,18 @@ async function launch() {
     fs: decoded.chromeFs,
     profile: 'profile',
     wispUrl: opts.wisp || undefined,
-    print: (s) => console.log('[gecko]', s),
-    printErr: (s) => console.warn('[gecko]', s),
+    print: (s) => { engineOutput(s); console.log('[gecko]', s); },
+    printErr: (s) => { engineOutput(s); console.warn('[gecko]', s); },
   });
   window.gecko = gecko;
   gecko.cssScale = res.scale; // mouse input in CSS pixels (resolution-loader.mjs)
   try {
     await gecko.init();
     console.log(`[firefox.html] engine initialized in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    attachTouchScroll(canvas, gecko);
     await gecko.load(BROWSER_CHROME_URL);
+    const q = await gecko.evalChrome(QUIT_HANDLER);
+    if (q !== 'ok') console.warn('[firefox.html] quit handler not installed:', q);
     if (res.scale !== 1) {
       const r = await gecko.evalChrome(RES_PRESS_HANDLER);
       if (r !== 'ok') console.warn('[firefox.html] resolution: popup press handler not installed:', r);
@@ -605,10 +714,8 @@ async function launch() {
     }
     if (opts.start) void gecko.evalChrome(`openTrustedLinkIn(${JSON.stringify(opts.start)}, 'current'); 'ok'`);
 
-    canvas.classList.add('ready');
-    splash.classList.add('done');
-    setPhase('running');
-    canvas.focus();
+    firefox = { gecko, start: opts.start };
+    showFirefox();
     window.geckoLoad = (u) => gecko.load(u);
     window.geckoEvalChrome = (js) => gecko.evalChrome(js);
     window.__firefoxHtml = { booted: true, bootSeconds: (performance.now() - t0) / 1000, gpu: useGpu, resolution: { width: engineW, height: engineH, scale: res.scale } };
