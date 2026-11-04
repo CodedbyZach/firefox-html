@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { patchGlueForCoop, COOP_MARKER } from './coop-glue.mjs';
 import { patchLoaderForCoop } from './coop-loader.mjs';
 import { patchLoaderForResolution } from './resolution-loader.mjs';
+import { patchLoaderForTouch } from './touch-loader.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WISP_URL = 'wss://itcode.vip/api/';
@@ -206,12 +207,13 @@ const embeddedAssetsPlugin = {
   },
 };
 // Pack-time patches to the upstream loader: the single-thread repaint policy
-// (coop-loader.mjs) and CSS-pixel input for the Resolution option (resolution-loader.mjs).
+// (coop-loader.mjs), CSS-pixel input for the Resolution option (resolution-loader.mjs) and
+// touch scrolling (touch-loader.mjs, after resolution-loader).
 const coopLoaderPlugin = {
   name: 'firefox-html-coop-loader',
   setup(b) {
     b.onLoad({ filter: /[\\/]gecko\.js[\\/]js[\\/]index\.ts$/ }, (a) => ({
-      contents: patchLoaderForResolution(patchLoaderForCoop(fs.readFileSync(a.path, 'utf8'))),
+      contents: patchLoaderForTouch(patchLoaderForResolution(patchLoaderForCoop(fs.readFileSync(a.path, 'utf8')))),
       loader: 'ts',
     }));
   },
@@ -237,6 +239,7 @@ if (!appJs.includes('coopFrameHash')) throw new Error('bundled loader is missing
 if (!appJs.includes('__fhtmlPress') || !appJs.includes('/ this.cssScale') || !appJs.includes('e.deltaY * this.cssScale')) {
   throw new Error('bundled loader is missing the Resolution patches');
 }
+if (!appJs.includes('touchScroll(clientX, clientY, dx, dy)')) throw new Error('bundled loader is missing the touch scrolling patch');
 appJs = appJs.replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\!--');
 
 // --- 3. assemble firefox.html ---------------------------------------------------

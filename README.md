@@ -6,7 +6,7 @@ Double-click it: Firefox starts inside the page. Nothing to install, run or serv
 
 | File | Purpose |
 | --- | --- |
-| `firefox.html` | The single-file browser (80,257,963 bytes). |
+| `firefox.html` | The single-file browser (80,268,403 bytes). |
 | `build.sh` | Reproducible build on Linux (Ubuntu 24.04). |
 | `build.ps1` | The same build from PowerShell. On Windows it runs `build.sh` inside WSL 2; on Linux it calls it directly. |
 | `resources/` | What the build scripts use: the packer, the page source (`src/`) and the engine patches (`patches/`). |
@@ -17,7 +17,7 @@ Double-click it: Firefox starts inside the page. Nothing to install, run or serv
 | Question | Answer |
 | --- | --- |
 | Did the real Firefox engine build? | Yes. Gecko 153.0a1 compiled with emscripten 6.0.1 and Rust 1.95.0, plus the two patches in `resources/patches`. Build ID `20261103131955`. |
-| Final HTML size | 80,257,963 bytes (76.5 MiB). |
+| Final HTML size | 80,268,403 bytes (76.5 MiB). |
 | Does it work from `file://`? | Yes. Opened from disk with no browser flags, Firefox boots in about 5 to 7 s (Chrome 153). |
 | Does it require a local server? | No. Served from a web server it also works, with or without the two COOP/COEP headers. With them it uses real multi-threading. |
 | Which features work? | See "Tested" below. |
@@ -83,10 +83,24 @@ Chrome 153 (headless), `firefox.html` opened as `file://` with no command-line f
   clicks (new tab, the address bar, items inside the app menu and the tab context menu), clicking
   outside an open menu, typing and scrolling all worked. Tested from `file://` and served with
   COOP/COEP, with the window resized before and after launch.
+- **Touch:** a finger drag scrolls the page or box under it 1:1 (200 px drag, 200 px scroll), a quick
+  swipe flings on, a tap still clicks, a drag that starts on a button doesn't click it, and the page
+  around Firefox never moves. Tested with Chromium's real touch input from `file://` (also at a pixel
+  ratio of 1.25 with GPU rendering) and served multi-threaded.
+- **Quitting** (Ctrl+Q, the menu's Exit, closing the last tab): a "Firefox closed" message counts down
+  3 s, then the launch page comes back; "Keep browsing" cancels. Firefox stays loaded behind it, so
+  Launch opens it again in about 60 ms with one fresh tab (three times in a row, no slowdown). A window
+  that really closes reloads the page instead. Tested from `file://` (software and GPU) and served
+  multi-threaded.
 
 **Doesn't work / limitations:**
 
 - Slower than the multi-threaded mode, because everything shares one CPU core.
+- In single-thread mode, reloading the page (F5) and launching again gets slower each time (5, then
+  21, then 55 s here): the browser doesn't fully free the previous engine, whose threads are suspended
+  in the page. Quitting Firefox doesn't reload, so it avoids this; multi-threaded pages are not
+  affected.
+- After a quit, the options can only be changed by reloading the page.
 - The New Tab page is blank.
 - From `file://` the profile lives in memory (browser storage for files is limited), so cookies and
   history are gone after a reload. On a website running multi-threaded, the profile is stored in OPFS;
@@ -186,6 +200,10 @@ The page side is in `resources/`:
 - `resolution-loader.mjs`: input for the Resolution option in upstream's loader: mouse positions in
   CSS pixels, wheel deltas in device pixels, and presses while a menu is open (above a pixel ratio of
   1 the engine's own "click outside a popup" test mixes the two, so the page does that test).
+- `src/touch.js` and `touch-loader.mjs`: touch scrolling. The loader forwards no touch input, so the
+  page turns finger drags into scrolling through the engine's wheel path (`touchScroll()`).
+- `src/app.js` ("quit"): answers Firefox's quit requests in the chrome window, so quitting returns to
+  the launch page with Firefox still loaded (a real quit would leave the engine with no window).
 
 ### What the build does (phases 1 to 4)
 
