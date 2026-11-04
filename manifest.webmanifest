@@ -3,7 +3,7 @@
   "name": "Firefox, compiled to WebAssembly",
   "short_name": "Firefox WASM",
   "description": "The real Gecko engine and Firefox front-end compiled to WebAssembly, running in your browser. Unofficial build, made by CodedbyZach (zmandem7).",
-  "start_url": "firefox.html",
+  "start_url": "proxyfox.html",
   "scope": "./",
   "display": "standalone",
   "background_color": "#131211",

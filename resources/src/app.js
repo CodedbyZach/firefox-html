@@ -1,11 +1,12 @@
-// firefox.html launcher. Decodes the Base64 runtime assets embedded in this
+// proxyfox.html launcher. Decodes the Base64 runtime assets embedded in this
 // page, turns them into Blob URLs / in-memory providers, and boots the real
 // Gecko engine through the project's own loader (gecko.js/js/index.ts, bundled
-// unmodified). The boot sequence mirrors firefox-wasm/demo/chrome/src/main.ts.
+// with the pack-time patches in resources/*-loader.mjs). The boot sequence
+// mirrors firefox-wasm/demo/chrome/src/main.ts.
 
 import { Gecko } from 'gecko-lib';
 import { ZSTDDecoder } from 'zstddec';
-import { provideEngineAssets } from './embedded-assets.js';
+import { provideEngineAssets, provideWarmModule } from './embedded-assets.js';
 import { indexTar, makeTarProvider, REQUIRED_FILES } from './tar-fs.js';
 import { createCoop } from './coop.js';
 import { attachTouchScroll } from './touch.js';
@@ -34,7 +35,7 @@ const resCancel = $('res-cancel');
 // option on, these Firefox prefs are added as an app default-prefs file in the
 // in-memory front-end, so Gecko keeps them local. Pages you open are unaffected.
 const QUIET_PREFS_PATH = 'browser/defaults/preferences/zz-firefox-html-quiet.js';
-const QUIET_PREFS = `// Added by firefox.html: "Block Firefox's background calls to Mozilla".
+const QUIET_PREFS = `// Added by proxyfox.html: "Block Firefox's background calls to Mozilla".
 pref("services.settings.server", "data:,#remote-settings-dummy/v1");
 pref("browser.region.network.url", "");
 pref("browser.region.update.enabled", false);
@@ -55,13 +56,39 @@ function addVirtualFile(index, filePath, text) {
 // ---------------------------------------------------------------- logging --
 const nativeConsole = { log: console.log.bind(console), warn: console.warn.bind(console), error: console.error.bind(console) };
 const MAX_LOG_LINES = 400;
+// While Firefox is open the log card is out of sight, so lines wait here (the last
+// MAX_LOG_LINES) and join the card when the launch page comes back: engine output then
+// costs no page work. The browser console still gets every line as it happens.
+let logHeld = null;
+let logScrolling = false;
 function logLine(level, args) {
+  const text = args.map((a) => (a instanceof Error ? a.stack || a.message : typeof a === 'string' ? a : safeJson(a))).join(' ');
+  if (!logHeld) return void appendLogLine(level, text);
+  logHeld.push([level, text]);
+  if (logHeld.length > 2 * MAX_LOG_LINES) logHeld.splice(0, logHeld.length - MAX_LOG_LINES);
+}
+function appendLogLine(level, text) {
   const line = document.createElement('div');
   line.className = 'log-line ' + level;
-  line.textContent = args.map((a) => (a instanceof Error ? a.stack || a.message : typeof a === 'string' ? a : safeJson(a))).join(' ');
+  line.textContent = text;
   logBox.appendChild(line);
   while (logBox.childElementCount > MAX_LOG_LINES) logBox.firstElementChild.remove();
-  logBox.scrollTop = logBox.scrollHeight;
+  // Scrolling to the end forces a layout: once per frame, not once per line.
+  if (logScrolling) return;
+  logScrolling = true;
+  requestAnimationFrame(() => {
+    logScrolling = false;
+    logBox.scrollTop = logBox.scrollHeight;
+  });
+}
+function holdLog(hold) {
+  if (hold) {
+    logHeld ??= [];
+    return;
+  }
+  const lines = logHeld ?? [];
+  logHeld = null;
+  for (const [level, text] of lines.slice(-MAX_LOG_LINES)) appendLogLine(level, text);
 }
 function safeJson(v) { try { return JSON.stringify(v); } catch { return String(v); } }
 for (const level of ['log', 'warn', 'error']) {
@@ -314,7 +341,7 @@ function fitScreen(engineWidth) {
 // launch after one got slower. Should the browser window really close some other way, the
 // engine can't show Firefox again, and the page reloads instead. The chrome code reaches the
 // page through dump(), which arrives on the engine's stdout (print below).
-const QUIT_MARK = '[firefox.html:quit]';
+const QUIT_MARK = '[proxyfox.html:quit]';
 const QUIT_HANDLER = `(() => {
   const say = (how) => dump(${JSON.stringify(QUIT_MARK)} + ' ' + how + '\\n');
   // Ctrl+Q and the menu's Exit (cmd_quitApplication): no "Quit Firefox?" prompt either.
@@ -347,6 +374,8 @@ function showFirefox() {
   setPhase('running');
   scrollTo(0, 0); // the page may have been scrolled down to the Launch button
   canvas.focus();
+  firefox?.gecko.refreshBox(); // laid out now: the box input positions map through (speed-loader.mjs)
+  holdLog(true);
 }
 // After a quit: the launch page again, with Firefox loaded behind it and reset to a fresh tab.
 async function backToLaunchPage() {
@@ -359,6 +388,7 @@ async function backToLaunchPage() {
     return;
   }
   $('quit').hidden = true;
+  holdLog(false);
   canvas.classList.remove('ready');
   splash.classList.remove('done');
   setPhase('ready');
@@ -367,7 +397,7 @@ async function backToLaunchPage() {
   $('relaunch-note').hidden = false;
   launchBtn.focus();
   const r = await firefox.gecko.evalChrome(freshStart(firefox.start)).catch((e) => String(e));
-  console.log(`[firefox.html] back at the launch page; Firefox stays loaded (fresh start: ${r} tab)`);
+  console.log(`[proxyfox.html] back at the launch page; Firefox stays loaded (fresh start: ${r} tab)`);
 }
 function keepBrowsing() {
   clearInterval(quitTimer);
@@ -389,7 +419,7 @@ function firefoxQuit(how) {
   $('quit').hidden = false;
   $('quit-now').focus();
   quitTimer = setInterval(() => (--left > 0 ? say() : void backToLaunchPage()), 1000);
-  console.log(`[firefox.html] Firefox ${how === 'closed' ? 'window closed' : 'quit'}: back to the launch page`);
+  console.log(`[proxyfox.html] Firefox ${how === 'closed' ? 'window closed' : 'quit'}: back to the launch page`);
 }
 function setupQuitDialog() {
   $('quit-now').addEventListener('click', () => void backToLaunchPage());
@@ -403,7 +433,7 @@ const engineOutput = (s) => {
 };
 
 // -------------------------------------------------------------------- app --
-// On the website, firefox.html is also an installable app (PWA): manifest.webmanifest and
+// On the website, proxyfox.html is also an installable app (PWA): manifest.webmanifest and
 // sw.js next to it keep this 77 MB file on the device, so the app opens from disk, offline
 // too, and an update downloads in the background. Opened from a file (shared on Discord,
 // say) there is no service worker or manifest, and nothing here runs.
@@ -419,8 +449,8 @@ function setupApp() {
     // As an app, ask the browser not to clear the copy on the device (and the profile)
     // when the disk runs low. Chromium answers without asking the user.
     if (installed()) void navigator.storage?.persist?.();
-    console.log('[firefox.html] app: sw.js keeps this page on the device');
-  }, (e) => console.log('[firefox.html] app: no sw.js on this site, so it opens from the network:', e.message));
+    console.log('[proxyfox.html] app: sw.js keeps this page on the device');
+  }, (e) => console.log('[proxyfox.html] app: no sw.js on this site, so it opens from the network:', e.message));
   navigator.serviceWorker.addEventListener('message', (e) => {
     if (e.data?.type === 'firefox-html-update') $('app-update').hidden = false;
   });
@@ -448,13 +478,13 @@ function setupApp() {
 // ------------------------------------------------------------ asset decode --
 function takeBase64(name) {
   const el = document.querySelector(`script[data-asset="${CSS.escape(name)}"]`);
-  if (!el) throw new Error(`firefox.html is missing the embedded asset "${name}"`);
+  if (!el) throw new Error(`proxyfox.html is missing the embedded asset "${name}"`);
   const text = el.textContent;
   el.remove();
   return text;
 }
 
-function base64ToBytes(b64) {
+async function base64ToBytes(b64) {
   if (typeof Uint8Array.fromBase64 === 'function') return Uint8Array.fromBase64(b64);
   const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
   const out = new Uint8Array((b64.length / 4) * 3 - pad);
@@ -463,6 +493,7 @@ function base64ToBytes(b64) {
   for (let i = 0; i < b64.length; i += CHUNK) {
     const bin = atob(b64.slice(i, i + CHUNK));
     for (let j = 0; j < bin.length; j++) out[o++] = bin.charCodeAt(j);
+    await tick(); // between 4 MB chunks: the checks, progress and input keep running
   }
   return out;
 }
@@ -476,7 +507,7 @@ async function sha256Hex(bytes) {
 async function verify(name, bytes, expected, what) {
   const got = await sha256Hex(bytes);
   if (got === null) return 'unverified (no WebCrypto)';
-  if (got !== expected) throw new Error(`${name}: ${what} SHA-256 mismatch (expected ${expected}, got ${got}); firefox.html is corrupt`);
+  if (got !== expected) throw new Error(`${name}: ${what} SHA-256 mismatch (expected ${expected}, got ${got}); proxyfox.html is corrupt`);
   return 'sha256 ok';
 }
 
@@ -496,7 +527,7 @@ async function decodeAssets() {
     const meta = A[name];
     step(name, `Decoding ${name} (${fmtBytes(meta.stored)} Base64 payload)`);
     await tick();
-    const bytes = base64ToBytes(takeBase64(name));
+    const bytes = await base64ToBytes(takeBase64(name));
     if (bytes.byteLength !== meta.stored) throw new Error(`${name}: decoded ${bytes.byteLength} bytes, expected ${meta.stored}`);
     const v1 = await verify(name, bytes, meta.sha256, 'stored payload');
     done += meta.stored;
@@ -509,13 +540,14 @@ async function decodeAssets() {
       await verify(name, raw, meta.sha256Raw, 'decompressed');
       done += meta.size;
     }
-    console.log(`[firefox.html] ${name}: ${fmtBytes(meta.stored)} stored${meta.compression === 'zstd' ? ` / ${fmtBytes(meta.size)} raw` : ''}, ${v1}`);
+    console.log(`[proxyfox.html] ${name}: ${fmtBytes(meta.stored)} stored${meta.compression === 'zstd' ? ` / ${fmtBytes(meta.size)} raw` : ''}, ${v1}`);
 
     if (name === 'gecko.js') {
       decoded.glueSource = new TextDecoder().decode(raw);
     } else if (name === 'gecko.data') {
-      // index.ts fetch()es this URL and zstd-decodes it in getPreloadedPackage.
-      decoded.dataZstUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+      // Handed to index.ts as bytes (speed-loader.mjs), which zstd-decodes them in
+      // getPreloadedPackage: no blob URL to fetch and no extra copy.
+      decoded.dataZstBytes = bytes;
     } else if (name === 'chrome-assets.tar') {
       const index = indexTar(raw);
       for (const p of REQUIRED_FILES) if (!index.files.has(p)) throw new Error(`chrome-assets.tar is missing ${p}`);
@@ -530,7 +562,7 @@ async function decodeAssets() {
   }
   provideEngineAssets({
     glueSource: decoded.glueSource,
-    dataZstUrl: decoded.dataZstUrl,
+    dataZstBytes: decoded.dataZstBytes,
     meta: { dataCompressed: true, dataSize: A['gecko.data'].size, wasmCompressed: false, wasmSize: A['gecko.wasm'].size },
   });
   setProgress(1, 'Engine assets ready', `${decoded.chromeFiles} front-end files, ${fmtBytes(A['gecko.wasm'].size)} engine module`);
@@ -560,10 +592,10 @@ async function proveEngine() {
     el.textContent = `Gecko engine compiled by this browser in ${((performance.now() - t0) / 1000).toFixed(1)} s: ` +
       `${(manifest.assets['gecko.wasm'].size / 1048576).toFixed(0)} MB WebAssembly, ${exp.length} exports (${keys.join(', ')}), ` +
       `${imp.length} imports${shared ? ', imported shared memory (needs threads)' : ''}. sha256 ${manifest.assets['gecko.wasm'].sha256Raw.slice(0, 16)}...`;
-    console.log('[firefox.html] ' + el.textContent);
+    console.log('[proxyfox.html] ' + el.textContent);
   } catch (e) {
     el.textContent = 'Compiling the engine module failed: ' + e.message;
-    console.error('[firefox.html] engine compile failed', e);
+    console.error('[proxyfox.html] engine compile failed', e);
   }
 }
 
@@ -624,6 +656,12 @@ async function main() {
   $('build-info').textContent = `Gecko ${manifest.build.geckoVersion} (HeyPuter/firefox @ ${manifest.build.geckoCommit.slice(0, 10)}), firefox-wasm @ ${manifest.build.firefoxWasmCommit.slice(0, 10)}, emscripten ${manifest.build.emscripten}, built ${manifest.build.date}`;
 
   setPhase('checking');
+  // The embedded engine decodes while the checks run (each step yields to them).
+  const decoding = (async () => {
+    await tick();
+    await decodeAssets();
+  })();
+  decoding.catch(() => {}); // reported below, once the checks are done
   await runChecks();
   // Off by default: in testing, GPU mode drew <canvas> content with red and blue swapped.
   userGpu = saved.gpu ?? false;
@@ -640,9 +678,9 @@ async function main() {
 
   setPhase('decoding');
   try {
-    await decodeAssets();
+    await decoding;
   } catch (e) {
-    console.error('[firefox.html] asset decode failed:', e);
+    console.error('[proxyfox.html] asset decode failed:', e);
     setProgress(0, 'Embedded assets could not be decoded', e.message);
     setPhase('error');
     return;
@@ -652,6 +690,8 @@ async function main() {
   if (!env.jspi) {
     $('engine-proof').hidden = false;
     void proveEngine();
+  } else if (!launchBtn.disabled) {
+    precompileEngine();
   }
   // After a quit Firefox is still loaded (see "quit"): Launch shows it again at once.
   launchBtn.onclick = () => {
@@ -659,6 +699,21 @@ async function main() {
     $('relaunch-note').hidden = true;
     showFirefox();
   };
+}
+
+// Launch is faster with the engine module already compiled: compile it now, in the
+// background, while the launch page is open (speed-loader.mjs instantiates it). The
+// compiled module holds its own copy, so the blob URL's is released.
+function precompileEngine() {
+  const t0 = performance.now();
+  provideWarmModule(WebAssembly.compileStreaming(fetch(decoded.wasmUrl)).then((mod) => {
+    URL.revokeObjectURL(decoded.wasmUrl);
+    console.log(`[proxyfox.html] engine compiled in the background in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    return mod;
+  }, (e) => {
+    console.warn('[proxyfox.html] background engine compile failed, so Launch compiles it:', e);
+    return null;
+  }));
 }
 
 async function launch() {
@@ -675,7 +730,7 @@ async function launch() {
   saveOpts(opts);
   if (opts.quiet) {
     addVirtualFile(decoded.chromeIndex, QUIET_PREFS_PATH, QUIET_PREFS);
-    console.log(`[firefox.html] background Mozilla calls blocked via /gre/${QUIET_PREFS_PATH}`);
+    console.log(`[proxyfox.html] background Mozilla calls blocked via /gre/${QUIET_PREFS_PATH}`);
   }
 
   const engineEnv = { GECKO_CHROME: '1' };
@@ -695,12 +750,12 @@ async function launch() {
     if (v === '') delete engineEnv[k.slice(4)];
     else engineEnv[k.slice(4)] = v;
   }
-  console.log('[firefox.html] engine env', engineEnv, 'wisp', opts.wisp || '(none)');
+  console.log('[proxyfox.html] engine env', engineEnv, 'wisp', opts.wisp || '(none)');
 
   if (env.coop) {
     const coop = createCoop({ glueSource: decoded.glueSource, log: (m) => console.error(m), debug: new URLSearchParams(location.search).has('coopdebug') });
     window.__coop = coop;
-    console.log('[firefox.html] single-thread mode: engine threads run cooperatively on the page thread');
+    console.log('[proxyfox.html] single-thread mode: engine threads run cooperatively on the page thread');
   }
 
   // Resolution (Options): device pixels per CSS pixel, kept when the window resizes. Gecko
@@ -710,10 +765,10 @@ async function launch() {
   const [engineW, engineH] = engineSize();
   if (res.scale !== 1) {
     addVirtualFile(decoded.chromeIndex, RES_PREFS_PATH,
-      `// Added by firefox.html: Options > Resolution.\npref("layout.css.devPixelsPerPx", "${res.scale}");\n`);
+      `// Added by proxyfox.html: Options > Resolution.\npref("layout.css.devPixelsPerPx", "${res.scale}");\n`);
   }
   fitScreen(engineW);
-  console.log(`[firefox.html] resolution ${engineW}x${engineH}` +
+  console.log(`[proxyfox.html] resolution ${engineW}x${engineH}` +
     (res.scale !== 1 ? ` (${res.scale.toFixed(3)} device pixels per CSS pixel)` : ''));
 
   const t0 = performance.now();
@@ -733,16 +788,16 @@ async function launch() {
   gecko.cssScale = res.scale; // mouse input in CSS pixels (resolution-loader.mjs)
   try {
     await gecko.init();
-    console.log(`[firefox.html] engine initialized in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    console.log(`[proxyfox.html] engine initialized in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     attachTouchScroll(canvas, gecko);
     await gecko.load(BROWSER_CHROME_URL);
     const q = await gecko.evalChrome(QUIT_HANDLER);
-    if (q !== 'ok') console.warn('[firefox.html] quit handler not installed:', q);
+    if (q !== 'ok') console.warn('[proxyfox.html] quit handler not installed:', q);
     if (res.scale !== 1) {
       const r = await gecko.evalChrome(RES_PRESS_HANDLER);
-      if (r !== 'ok') console.warn('[firefox.html] resolution: popup press handler not installed:', r);
+      if (r !== 'ok') console.warn('[proxyfox.html] resolution: popup press handler not installed:', r);
     }
-    console.log(`[firefox.html] Firefox front-end booted in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    console.log(`[proxyfox.html] Firefox front-end booted in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     await gecko.evalChrome(`setToolbarVisibility(document.getElementById('PersonalToolbar'), 'never'); 'ok'`).catch(() => {});
     // Same one-time DuckDuckGo default as the official chrome-demo.
     const SEARCH_KEY = 'firefox-html-search-seeded';
@@ -773,7 +828,7 @@ async function launch() {
     let rt;
     addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(resizeEngine, 200); });
   } catch (e) {
-    console.error('[firefox.html] startup failed', e);
+    console.error('[proxyfox.html] startup failed', e);
     setPhase('error');
     window.__firefoxHtml = { booted: false, error: String(e && e.message || e) };
   }

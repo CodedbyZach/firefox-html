@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-// Packs a finished firefox-wasm build into ONE self-contained firefox.html.
+// Packs a finished firefox-wasm build into ONE self-contained proxyfox.html.
 //
-//   node resources/pack.mjs --repo /path/to/firefox-wasm [--out firefox.html]
+//   node resources/pack.mjs --repo /path/to/firefox-wasm [--out proxyfox.html]
 //   The default WISP relay for websites is wss://itcode.vip/api/ (shown under Options);
 //   WISP_URL=wss://relay.example/ bakes in another one, WISP_URL= (empty) none.
 //   (build.sh / build.ps1 run this as their "pack" stage)
 //
-//   node resources/pack.mjs --repo /path/to/firefox-wasm --engine-from firefox.html
-//   Page-only rebuild: reuses the engine already inside an earlier firefox.html (its four
+//   node resources/pack.mjs --repo /path/to/firefox-wasm --engine-from proxyfox.html
+//   Page-only rebuild: reuses the engine already inside an earlier build (proxyfox.html, or a
+//   firefox.html from before the rename; its four
 //   assets and build info, checked against its SHA-256 manifest) instead of an engine
 //   build, so changes to resources/src take a minute instead of hours. --repo then only
 //   needs a firefox-wasm checkout (build.sh clone) for the loader and LICENSE. The glue is
@@ -18,7 +19,7 @@
 //   gecko.js/wasm/gecko.wasm          the Gecko engine module (zstd'd here, cached)
 //   gecko.js/wasm/gecko.data.zst      minimal GRE preload package (+ gecko-assets.json)
 //   demo/chrome/public/chrome-assets.tar.zst  Firefox front-end + full GRE resources (+ .json)
-//   gecko.js/js/index.ts              the official loader, bundled unmodified
+//   gecko.js/js/index.ts              the official loader, bundled with the *-loader.mjs patches
 //
 // Each binary asset becomes a Base64 <script type="application/octet-stream">
 // block; app.js decodes them, verifies SHA-256, and wires them into the runtime.
@@ -32,6 +33,7 @@ import { patchGlueForCoop, COOP_MARKER } from './coop-glue.mjs';
 import { patchLoaderForCoop } from './coop-loader.mjs';
 import { patchLoaderForResolution } from './resolution-loader.mjs';
 import { patchLoaderForTouch } from './touch-loader.mjs';
+import { patchLoaderForSpeed } from './speed-loader.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WISP_URL = 'wss://itcode.vip/api/';
@@ -41,7 +43,7 @@ const arg = (name, def) => {
   return i >= 0 ? argv[i + 1] : def;
 };
 const REPO = path.resolve(arg('repo', path.join(HERE, '..', 'work', 'firefox-wasm')));
-const OUT = path.resolve(arg('out', path.join(HERE, '..', 'firefox.html')));
+const OUT = path.resolve(arg('out', path.join(HERE, '..', 'proxyfox.html')));
 const CACHE = path.join(HERE, 'build-cache');
 const WASM_DIR = path.join(REPO, 'gecko.js', 'wasm');
 const CHROME_PUBLIC = path.join(REPO, 'demo', 'chrome', 'public');
@@ -65,7 +67,7 @@ const git = (dir) => {
 };
 
 // --- 1. collect the runtime assets ------------------------------------------
-// From the engine build in --repo, or with --engine-from from an earlier firefox.html.
+// From the engine build in --repo, or with --engine-from from an earlier build.
 const ASSET_NAMES = ['gecko.js', 'gecko.data', 'chrome-assets.tar', 'gecko.wasm'];
 
 function checkGlue(src, what) {
@@ -74,7 +76,7 @@ function checkGlue(src, what) {
     if (!src.includes(marker)) throw new Error(`${what} is missing the post-link patch marker "${marker}" (patch-gecko-shaderfix.mjs did not run)`);
   }
   if (!src.includes('_emscripten_coop_wait')) {
-    throw new Error(`${what} has no cooperative-thread imports: the engine was linked without the firefox.html patches (build.sh engine applies them)`);
+    throw new Error(`${what} has no cooperative-thread imports: the engine was linked without this project's patches (build.sh engine applies them)`);
   }
 }
 
@@ -140,17 +142,17 @@ function engineFromBuild() {
   };
 }
 
-// --engine-from: the four engine assets of an earlier firefox.html, byte for byte, each
+// --engine-from: the four engine assets of an earlier build, byte for byte, each
 // checked against that file's manifest, plus the build info that describes them.
 function engineFromHtml(file) {
-  const html = fs.readFileSync(must(file, 'pass an existing firefox.html to --engine-from'));
+  const html = fs.readFileSync(must(file, 'pass an existing proxyfox.html (or an older firefox.html) to --engine-from'));
   const scriptBody = (open, encoding) => {
     const at = html.indexOf(open);
     const end = at < 0 ? -1 : html.indexOf('</script>', at + open.length);
     return end < 0 ? null : html.toString(encoding, at + open.length, end);
   };
   const old = JSON.parse(scriptBody('<script type="application/json" id="asset-manifest">', 'utf8') || 'null');
-  if (!old || old.format !== 1 || !old.assets || !old.build) throw new Error(`${file} has no firefox.html asset manifest`);
+  if (!old || old.format !== 1 || !old.assets || !old.build) throw new Error(`${file} has no asset manifest (not a proxyfox.html build)`);
   const assets = ASSET_NAMES.map((name) => {
     const meta = old.assets[name];
     const b64 = scriptBody(`<script type="application/octet-stream" data-asset="${name}" data-encoding="base64">`, 'latin1');
@@ -206,14 +208,15 @@ const embeddedAssetsPlugin = {
     }));
   },
 };
-// Pack-time patches to the upstream loader: the single-thread repaint policy
-// (coop-loader.mjs), CSS-pixel input for the Resolution option (resolution-loader.mjs) and
-// touch scrolling (touch-loader.mjs, after resolution-loader).
+// Pack-time patches to the upstream loader, in this order: the frame hash and last-input
+// time (coop-loader.mjs), CSS-pixel input for the Resolution option (resolution-loader.mjs),
+// touch scrolling (touch-loader.mjs) and the idle repaint, launch and input speed-ups
+// (speed-loader.mjs).
 const coopLoaderPlugin = {
   name: 'firefox-html-coop-loader',
   setup(b) {
     b.onLoad({ filter: /[\\/]gecko\.js[\\/]js[\\/]index\.ts$/ }, (a) => ({
-      contents: patchLoaderForTouch(patchLoaderForResolution(patchLoaderForCoop(fs.readFileSync(a.path, 'utf8')))),
+      contents: patchLoaderForSpeed(patchLoaderForTouch(patchLoaderForResolution(patchLoaderForCoop(fs.readFileSync(a.path, 'utf8')))), EMBEDDED),
       loader: 'ts',
     }));
   },
@@ -240,9 +243,12 @@ if (!appJs.includes('__fhtmlPress') || !appJs.includes('/ this.cssScale') || !ap
   throw new Error('bundled loader is missing the Resolution patches');
 }
 if (!appJs.includes('touchScroll(clientX, clientY, dx, dy)')) throw new Error('bundled loader is missing the touch scrolling patch');
+for (const marker of ['takeWarmModule() ??', 'takeDataZstBytes() ??', 'refreshBox() {', '.waitAsync(', 'blitDrawnHash', 'addEventListener("visibilitychange"']) {
+  if (!appJs.includes(marker)) throw new Error(`bundled loader is missing the speed patches (${marker})`);
+}
 appJs = appJs.replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\!--');
 
-// --- 3. assemble firefox.html ---------------------------------------------------
+// --- 3. assemble proxyfox.html -------------------------------------------------
 const escHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const mpl = fs.readFileSync(must(path.join(REPO, 'LICENSE')), 'utf8');
 // Full texts of every license whose code is bundled into the page. The dependency

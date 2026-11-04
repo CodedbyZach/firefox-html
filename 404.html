@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- GitHub Pages serves this for any address that doesn't exist. Old links to firefox.html
+     (the app's name before it became proxyfox.html) open the app; anything else links to it. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Not found</title>
+<script>
+  if (/\/firefox\.html$/.test(location.pathname)) {
+    location.replace(location.pathname.replace(/firefox\.html$/, 'proxyfox.html') + location.search + location.hash);
+  }
+</script>
+<style>
+  :root { --bg: #f4f3f1; --text: #1c1b1a; --link: #c2410c; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #131211; --text: #ecebe9; --link: #fb923c; } }
+  body { margin: 48px 16px; background: var(--bg); color: var(--text); font: 16px system-ui, sans-serif; }
+  a { color: var(--link); }
+</style>
+</head>
+<body>
+<p>There's nothing at this address. <a href="/">Open Firefox</a></p>
+</body>
+</html>

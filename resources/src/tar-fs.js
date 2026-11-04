@@ -1,7 +1,7 @@
 // In-memory FsProvider over the decompressed chrome-assets tar (the non-binary
 // GRE resources + the Firefox front-end `browser/` app dir). Adapted from
 // firefox-wasm/demo/chrome/src/chrome-fs.ts (MPL-2.0); the only difference is
-// that the tar bytes come from firefox.html instead of a fetch().
+// that the tar bytes come from proxyfox.html instead of a fetch().
 
 const textDecoder = new TextDecoder();
 
