@@ -1,0 +1,16 @@
+{
+  "id": "firefox.html",
+  "name": "Firefox, compiled to WebAssembly",
+  "short_name": "Firefox WASM",
+  "description": "The real Gecko engine and Firefox front-end compiled to WebAssembly, running in your browser. Unofficial build, made by CodedbyZach (zmandem7).",
+  "start_url": "firefox.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#131211",
+  "theme_color": "#131211",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

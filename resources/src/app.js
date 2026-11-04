@@ -402,6 +402,49 @@ const engineOutput = (s) => {
   if (typeof s === 'string' && s.includes(QUIT_MARK)) firefoxQuit(s.includes(`${QUIT_MARK} closed`) ? 'closed' : 'quit');
 };
 
+// -------------------------------------------------------------------- app --
+// On the website, firefox.html is also an installable app (PWA): manifest.webmanifest and
+// sw.js next to it keep this 77 MB file on the device, so the app opens from disk, offline
+// too, and an update downloads in the background. Opened from a file (shared on Discord,
+// say) there is no service worker or manifest, and nothing here runs.
+function setupApp() {
+  if (!/^https?:$/.test(location.protocol) || !window.isSecureContext || !navigator.serviceWorker) return;
+  const installed = () => matchMedia('(display-mode: standalone)').matches;
+  navigator.serviceWorker.register('sw.js').then(() => {
+    // The site has the app files, so the manifest is there too: offer to install.
+    const manifestLink = document.createElement('link');
+    manifestLink.rel = 'manifest';
+    manifestLink.href = 'manifest.webmanifest';
+    document.head.append(manifestLink);
+    // As an app, ask the browser not to clear the copy on the device (and the profile)
+    // when the disk runs low. Chromium answers without asking the user.
+    if (installed()) void navigator.storage?.persist?.();
+    console.log('[firefox.html] app: sw.js keeps this page on the device');
+  }, (e) => console.log('[firefox.html] app: no sw.js on this site, so it opens from the network:', e.message));
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type === 'firefox-html-update') $('app-update').hidden = false;
+  });
+  $('app-update-reload').addEventListener('click', () => location.reload());
+  // Chromium offers installing through this event; elsewhere the button just never shows.
+  let install = null;
+  addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    install = e;
+    $('install-app').hidden = false;
+  });
+  $('install-app').addEventListener('click', async () => {
+    if (!install) return;
+    $('install-app').hidden = true;
+    install.prompt();
+    await install.userChoice.catch(() => {});
+    install = null;
+  });
+  addEventListener('appinstalled', () => {
+    $('install-app').hidden = true;
+    void navigator.storage?.persist?.();
+  });
+}
+
 // ------------------------------------------------------------ asset decode --
 function takeBase64(name) {
   const el = document.querySelector(`script[data-asset="${CSS.escape(name)}"]`);
@@ -571,6 +614,7 @@ async function refreshWisp() {
 
 async function main() {
   setupQuitDialog();
+  setupApp();
   const saved = loadOpts();
   // An empty saved value (e.g. from a build without a default relay) falls back to the default.
   optWisp.value = saved.wisp || defaultWispUrl();
