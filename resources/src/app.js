@@ -7,6 +7,7 @@
 import { Gecko } from 'gecko-lib';
 import { ZSTDDecoder } from 'zstddec';
 import { provideEngineAssets, provideWarmModule } from './embedded-assets.js';
+import { patchGlue } from './glue-patches.js';
 import { indexTar, makeTarProvider, REQUIRED_FILES } from './tar-fs.js';
 import { createCoop } from './coop.js';
 import { attachTouchScroll } from './touch.js';
@@ -35,6 +36,7 @@ const resCancel = $('res-cancel');
 // option on, these Firefox prefs are added as an app default-prefs file in the
 // in-memory front-end, so Gecko keeps them local. Pages you open are unaffected.
 const QUIET_PREFS_PATH = 'browser/defaults/preferences/zz-firefox-html-quiet.js';
+const PAGE_PREFS_PATH = 'browser/defaults/preferences/zz-firefox-html-page.js';
 const QUIET_PREFS = `// Added by proxyfox.html: "Block Firefox's background calls to Mozilla".
 pref("services.settings.server", "data:,#remote-settings-dummy/v1");
 pref("browser.region.network.url", "");
@@ -354,6 +356,35 @@ const QUIT_HANDLER = `(() => {
   addEventListener('unload', () => say('closed'));
   return 'ok';
 })()`;
+// Fixes inside Firefox's window for things this engine build can't do (installed after boot).
+//  - about:support and about:processes call ChromeUtils.requestProcInfo(), which reaches
+//    GetProcInfoSync, a native function this build doesn't have: it aborted the thread that
+//    called it. Every privileged global gets an answer describing this one process instead.
+//  - Only this one window is drawn, so a new window, a private window or the Library opened
+//    where nobody could see them (and could take the focus). They open as tabs instead.
+const BROWSER_FIXES = `(() => {
+  const done = [];
+  const note = (label) => { try { gNotificationBox.appendNotification('proxyfox-note', { label, priority: gNotificationBox.PRIORITY_INFO_MEDIUM }, []); } catch (e) {} };
+  const procInfo = async () => ({ pid: 1, childID: 0, filename: 'proxyfox', type: 'browser', origin: '', windows: [], utilityActors: [], threads: [], children: [], cpuTime: 0, cpuCycleCount: 0, memory: 0 });
+  const patch = (g) => { try { if (g && g.ChromeUtils && g.ChromeUtils.requestProcInfo !== procInfo) g.ChromeUtils.requestProcInfo = procInfo; } catch (e) {} };
+  patch(window);
+  try { patch(Cu.getGlobalForObject(ChromeUtils.importESModule('resource://gre/modules/Troubleshoot.sys.mjs'))); done.push('procinfo'); } catch (e) {}
+  Services.obs.addObserver((doc) => { try { if (doc.nodePrincipal && doc.nodePrincipal.isSystemPrincipal) patch(doc.defaultView); } catch (e) {} }, 'document-element-inserted');
+  const tab = (url) => { gBrowser.selectedTab = gBrowser.addTrustedTab(url); };
+  window.OpenBrowserWindow = (options) => {
+    tab(BROWSER_NEW_TAB_URL);
+    if (options && options.private) note("Private windows aren't available here, so this opened as a normal tab.");
+    return window;
+  };
+  const openLinkIn = window.openLinkIn;
+  window.openLinkIn = function (url, where, params) { return openLinkIn.call(this, url, where === 'window' ? 'tab' : where, params); };
+  try {
+    PlacesCommandHook.showPlacesOrganizer = (item) => tab(item === 'Downloads' ? 'about:downloads' : 'chrome://browser/content/places/places.xhtml');
+    done.push('library');
+  } catch (e) {}
+  try { BrowserCommands.pageInfo = () => note("Page Info isn't available in this build."); } catch (e) {}
+  return 'ok ' + done.join(',');
+})()`;
 // The fresh start the next Launch shows: popups closed, one new tab (or "Open after launch").
 const freshStart = (start) => `(() => {
   for (const p of document.querySelectorAll('panel, menupopup')) if (p.state === 'open' || p.state === 'showing') p.hidePopup();
@@ -543,7 +574,11 @@ async function decodeAssets() {
     console.log(`[proxyfox.html] ${name}: ${fmtBytes(meta.stored)} stored${meta.compression === 'zstd' ? ` / ${fmtBytes(meta.size)} raw` : ''}, ${v1}`);
 
     if (name === 'gecko.js') {
-      decoded.glueSource = new TextDecoder().decode(raw);
+      // Fixes to the glue's JavaScript (glue-patches.js): Gecko's clock in a background tab,
+      // reconnecting the relay, video frames. The embedded bytes stay as built.
+      const glue = patchGlue(new TextDecoder().decode(raw));
+      if (glue.missing.length) console.warn('[proxyfox.html] glue patches not applied:', glue.missing.join('; '));
+      decoded.glueSource = glue.src;
     } else if (name === 'gecko.data') {
       // Handed to index.ts as bytes (speed-loader.mjs), which zstd-decodes them in
       // getPreloadedPackage: no blob URL to fetch and no extra copy.
@@ -647,6 +682,9 @@ async function refreshWisp() {
 async function main() {
   setupQuitDialog();
   setupApp();
+  // Chrome's Memory Saver (Edge: sleeping tabs) unloads big background tabs; coming back
+  // reloads the page, which looked like Firefox breaking. Say what happened and how to stop it.
+  $('discarded-note').hidden = !document.wasDiscarded;
   const saved = loadOpts();
   // An empty saved value (e.g. from a build without a default relay) falls back to the default.
   optWisp.value = saved.wisp || defaultWispUrl();
@@ -733,6 +771,17 @@ async function launch() {
     console.log(`[proxyfox.html] background Mozilla calls blocked via /gre/${QUIET_PREFS_PATH}`);
   }
 
+  // Prefs for this page (a virtual default-prefs file, read by Gecko at startup):
+  //  - window.open() popups open as tabs: only this one window is drawn.
+  //  - Software mode: CSS transform/opacity animations run on the main thread. Gecko hands
+  //    them to its compositor otherwise, which never draws in this mode, so they stood still.
+  //  - ?pref.NAME=value sets any other startup pref (true/false, a number, or text).
+  const urlPrefs = [...new URLSearchParams(location.search)].filter(([k]) => k.startsWith('pref.') && k.length > 5)
+    .map(([k, v]) => `pref(${JSON.stringify(k.slice(5))}, ${/^(true|false|-?\d+)$/.test(v) ? v : JSON.stringify(v)});\n`).join('');
+  addVirtualFile(decoded.chromeIndex, PAGE_PREFS_PATH, '// Added by proxyfox.html (see app.js).\n' +
+    'pref("browser.link.open_newwindow.restriction", 0);\n' +
+    (useGpu ? '' : 'pref("layers.offmainthreadcomposition.async-animations", false);\n') + urlPrefs);
+
   const engineEnv = { GECKO_CHROME: '1' };
   if (useGpu) Object.assign(engineEnv, { GECKO_GPU: '1', GECKO_GL_PASSTHROUGH: '1', GECKO_WR_DIRECT: '1', GECKO_APZ: '1' });
   if (!opts.jit) engineEnv.GECKO_NOWASMJIT = '1';
@@ -793,6 +842,8 @@ async function launch() {
     await gecko.load(BROWSER_CHROME_URL);
     const q = await gecko.evalChrome(QUIT_HANDLER);
     if (q !== 'ok') console.warn('[proxyfox.html] quit handler not installed:', q);
+    const f = await gecko.evalChrome(BROWSER_FIXES);
+    if (!/^ok/.test(f)) console.warn('[proxyfox.html] browser fixes not installed:', f);
     if (res.scale !== 1) {
       const r = await gecko.evalChrome(RES_PRESS_HANDLER);
       if (r !== 'ok') console.warn('[proxyfox.html] resolution: popup press handler not installed:', r);

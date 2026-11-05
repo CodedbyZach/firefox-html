@@ -34,6 +34,7 @@ import { patchLoaderForCoop } from './coop-loader.mjs';
 import { patchLoaderForResolution } from './resolution-loader.mjs';
 import { patchLoaderForTouch } from './touch-loader.mjs';
 import { patchLoaderForSpeed } from './speed-loader.mjs';
+import { patchGlue } from './src/glue-patches.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WISP_URL = 'wss://itcode.vip/api/';
@@ -171,6 +172,11 @@ function engineFromHtml(file) {
 
 const engine = ENGINE_FROM ? engineFromHtml(path.resolve(ENGINE_FROM)) : engineFromBuild();
 const { assets } = engine;
+// app.js patches the glue when the page loads (src/glue-patches.js); each must still apply.
+{
+  const { missing } = patchGlue(assets[0].bytes.toString('utf8'));
+  if (missing.length) throw new Error(`glue patches no longer apply to this gecko.js: ${missing.join('; ')}`);
+}
 const manifest = {
   format: 1,
   assets: Object.fromEntries(assets.map((a) => [a.name, {
@@ -243,7 +249,7 @@ if (!appJs.includes('__fhtmlPress') || !appJs.includes('/ this.cssScale') || !ap
   throw new Error('bundled loader is missing the Resolution patches');
 }
 if (!appJs.includes('touchScroll(clientX, clientY, dx, dy)')) throw new Error('bundled loader is missing the touch scrolling patch');
-for (const marker of ['takeWarmModule() ??', 'takeDataZstBytes() ??', 'refreshBox() {', '.waitAsync(', 'blitDrawnHash', 'addEventListener("visibilitychange"']) {
+for (const marker of ['takeWarmModule() ??', 'takeDataZstBytes() ??', 'refreshBox() {', '.waitAsync(', 'blitDrawnHash', 'addEventListener("visibilitychange"', 'function createGlBlit(', 'this.glBlit.frame(']) {
   if (!appJs.includes(marker)) throw new Error(`bundled loader is missing the speed patches (${marker})`);
 }
 appJs = appJs.replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\!--');
