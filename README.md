@@ -29,6 +29,7 @@ On the launch page, under **Options**:
 | Resolution | Draws Firefox with more pixels, from your screen's size up to 4K. Above Current it turns on GPU acceleration. |
 | GPU acceleration | Draws with your GPU through WebGL2. Smoother, but `<canvas>` content on websites shows red and blue swapped. |
 | Block Firefox's background calls to Mozilla | Keeps Firefox from contacting Mozilla's services on its own. On by default. |
+| Save websites' files between visits | Firefox's disk cache (up to 256 MB, in this site's browser storage): sites you visited before load from your device instead of through the relay again. On by default; only on the website running multi-threaded, where the profile is saved. |
 | Experimental JS to WASM JIT | Faster JavaScript on some sites, breaks others. Off by default. |
 | WISP server | The relay websites load through. Default `wss://itcode.vip/api/`. |
 | Open after launch | A page to open when Firefox starts. |

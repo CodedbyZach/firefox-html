@@ -224,6 +224,7 @@ body.res-scaled #screen, body.res-scaled #popup-overlay, body.res-scaled [data-l
           </div>
           <label class="toggle"><input type="checkbox" id="opt-gpu"><span><b>GPU acceleration</b><small>WebRender through your browser's WebGL2: smoother scrolling and animation. Off by default because in testing it drew &lt;canvas&gt; content on web pages with red and blue swapped (images, text and CSS were correct).</small><small id="gpu-forced" class="forced" hidden>On because Resolution is above Current.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-quiet"><span><b>Block Firefox's background calls to Mozilla</b><small>Like desktop Firefox, the engine contacts Remote Settings and a region service on its own. On by default: these Firefox prefs keep it local. Sites you open are unaffected.</small></span></label>
+          <label class="toggle"><input type="checkbox" id="opt-cache"><span><b>Save websites' files between visits</b><small>Firefox's disk cache, kept in this site's storage in your browser: pages you visited before load from your device instead of downloading again (about 3 times faster in testing). On by default.</small><small id="cache-unavailable" class="forced" hidden>Not available here: opened as a file or single-threaded, Firefox's profile isn't saved.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-jit"><span><b>Experimental JS to WASM JIT</b><small>Upstream marks it unusable on many sites. Off by default.</small></span></label>
           <label class="field"><span>WISP server</span><small>WebSocket relay that Gecko's network stack (Necko) tunnels TCP through. Browsers cannot open raw sockets, so websites load through this relay. HTTPS stays encrypted end to end (Gecko does the encryption); plain HTTP pages are visible to the relay. Change it to use another relay, or clear it to load only local pages.</small><input type="text" id="opt-wisp" spellcheck="false" autocomplete="off"></label>
           <label class="field"><span>Open after launch</span><small>Optional URL for the first tab, for example <code>about:mozilla</code> or <code>https://example.com/</code>.</small><input type="text" id="opt-start" spellcheck="false" autocomplete="off" placeholder="(Firefox default)"></label>
@@ -3520,6 +3521,7 @@ var optJit = $("opt-jit");
 var optWisp = $("opt-wisp");
 var optStart = $("opt-start");
 var optQuiet = $("opt-quiet");
+var optCache = $("opt-cache");
 var optRes = $("opt-res");
 var resApply = $("res-apply");
 var resCancel = $("res-cancel");
@@ -3727,6 +3729,7 @@ var RES_STEPS = [
 var resStops = [{ name: "Current", width: 0 }];
 var resApplied = 0;
 var userGpu = false;
+var userCache = true;
 var launched = false;
 var pageW = () => Math.max(1, innerWidth);
 var pageH = () => Math.max(1, innerHeight);
@@ -4124,6 +4127,14 @@ async function main() {
   });
   await runChecks();
   userGpu = saved.gpu ?? false;
+  userCache = saved.cache ?? true;
+  const canCache = env.opfs && !env.coop;
+  optCache.checked = userCache && canCache;
+  optCache.disabled = !canCache;
+  $("cache-unavailable").hidden = canCache;
+  optCache.addEventListener("change", () => {
+    if (!optCache.disabled) userCache = optCache.checked;
+  });
   optGpu.addEventListener("change", () => {
     if (!optGpu.disabled) userGpu = optGpu.checked;
   });
@@ -4178,10 +4189,11 @@ async function launch() {
   launchBtn.querySelector("span").textContent = "Starting Firefox";
   optRes.value = String(resAppliedIndex());
   const useGpu = optGpu.checked;
-  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet, optRes]) el.disabled = true;
+  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet, optCache, optRes]) el.disabled = true;
   renderRes();
   setPhase("booting");
-  const opts = { gpu: userGpu, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, res: resApplied };
+  const opts = { gpu: userGpu, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, cache: userCache, res: resApplied };
+  const useCache = opts.cache && env.opfs && !env.coop;
   saveOpts(opts);
   if (opts.quiet) {
     addVirtualFile(decoded.chromeIndex, QUIET_PREFS_PATH, QUIET_PREFS);
@@ -4189,10 +4201,11 @@ async function launch() {
   }
   const urlPrefs = [...new URLSearchParams(location.search)].filter(([k]) => k.startsWith("pref.") && k.length > 5).map(([k, v]) => `pref(${JSON.stringify(k.slice(5))}, ${/^(true|false|-?\d+)$/.test(v) ? v : JSON.stringify(v)});
 `).join("");
-  addVirtualFile(decoded.chromeIndex, PAGE_PREFS_PATH, '// Added by proxyfox.html (see app.js).\npref("browser.link.open_newwindow.restriction", 0);\n' + (useGpu ? "" : 'pref("layers.offmainthreadcomposition.async-animations", false);\n') + urlPrefs);
+  addVirtualFile(decoded.chromeIndex, PAGE_PREFS_PATH, '// Added by proxyfox.html (see app.js).\npref("browser.link.open_newwindow.restriction", 0);\n' + (useGpu ? "" : 'pref("layers.offmainthreadcomposition.async-animations", false);\n') + (useCache ? 'pref("browser.cache.disk.smart_size.enabled", false);\npref("browser.cache.disk.capacity", 262144);\n' : "") + urlPrefs);
   const engineEnv = { GECKO_CHROME: "1" };
   if (useGpu) Object.assign(engineEnv, { GECKO_GPU: "1", GECKO_GL_PASSTHROUGH: "1", GECKO_WR_DIRECT: "1", GECKO_APZ: "1" });
   if (!opts.jit) engineEnv.GECKO_NOWASMJIT = "1";
+  if (useCache) engineEnv.GECKO_DISK_CACHE = "1";
   if (!env.opfs || env.coop) engineEnv.GECKO_SKIP_OPFS = "1";
   if (env.coop) engineEnv.GECKO_COARSE_CLOCK = "0";
   for (const [k, v] of new URLSearchParams(location.search)) {
