@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- Gecko 153.0a1 compiled to WebAssembly in one file. Unofficial build; Firefox is a trademark of the Mozilla Foundation. Source links and full license texts: Licenses section at the bottom of the page. -->
+<!-- proxyfox.html: Made by CodedbyZach (zmandem7). Gecko 153.0a1 compiled to WebAssembly in one file. The page's own code is licensed under the GNU AGPL 3.0 with an attribution term: copies and changed versions must keep "Made by CodedbyZach (zmandem7)". Unofficial build; Firefox is a trademark of the Mozilla Foundation. Source links and full license texts: Licenses section at the bottom of the page. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -153,6 +153,7 @@ body[data-phase="checking"] .log-card, body[data-phase="decoding"] .log-card { o
 
 footer { color: var(--muted); font-size: 12.5px; }
 footer p { margin: 4px 0; }
+footer .credit { color: var(--text); font-weight: 600; }
 footer details pre { max-height: 260px; overflow: auto; background: var(--code); padding: 10px; border-radius: 6px; white-space: pre-wrap; font-size: 11.5px; }
 
 #screen { display: none; position: fixed; inset: 0; width: 100vw; height: 100vh; border: 0; outline: none; background: #fff; image-rendering: pixelated; }
@@ -244,9 +245,16 @@ body.res-scaled #screen, body.res-scaled #popup-overlay, body.res-scaled [data-l
     </section>
 
     <footer>
+      <p class="credit">Made by CodedbyZach (zmandem7). This page's own code is licensed under the GNU AGPL 3.0; copies and changed versions must keep this credit (Licenses, below).</p>
       <p id="build-info"></p>
       <p>Unofficial build of <a href="https://github.com/HeyPuter/firefox-wasm">HeyPuter/firefox-wasm</a>. Gecko and the Firefox front-end are Mozilla code under the Mozilla Public License 2.0; source: <a href="https://github.com/HeyPuter/firefox">HeyPuter/firefox</a>. Firefox is a trademark of the Mozilla Foundation.</p>
-      <details><summary>Licenses</summary><pre id="licenses">Gecko, the Firefox front-end, and the firefox-wasm embedder/loader:
+      <details><summary>Licenses</summary><pre id="licenses">proxyfox.html: Made by CodedbyZach (zmandem7). Copyright (C) 2026 CodedbyZach (zmandem7).
+  The page's own code (the launch page, its loader patches, Resolution, touch, quit and the
+  installable app) is licensed under the GNU AGPL 3.0 (full text below), with an additional term
+  under its section 7(b): any copy or modified version must keep the attribution
+  "Made by CodedbyZach (zmandem7)" visible on its launch page and in these credits.
+
+Gecko, the Firefox front-end, and the firefox-wasm embedder/loader:
   Mozilla Public License 2.0. Source: https://github.com/HeyPuter/firefox @ 7c9318a20733cedf424d2a7c72dad0b3c307847f
   and https://github.com/HeyPuter/firefox-wasm @ f004656b7c55ec3408c403c3d831ff6d10bb842b
   Licenses of the third-party code inside Gecko: open about:license in the running browser.
@@ -634,7 +642,7 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 
 
 
-==================== GNU AGPL 3.0 (@mercuryworkshop/wisp-js) ====================
+==================== GNU AGPL 3.0 (proxyfox.html's own code, @mercuryworkshop/wisp-js) ====================
 
 
                     GNU AFFERO GENERAL PUBLIC LICENSE
