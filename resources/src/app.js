@@ -26,6 +26,7 @@ const optJit = $('opt-jit');
 const optWisp = $('opt-wisp');
 const optStart = $('opt-start');
 const optQuiet = $('opt-quiet');
+const optCache = $('opt-cache');
 const optRes = $('opt-res');
 const resApply = $('res-apply');
 const resCancel = $('res-cancel');
@@ -233,6 +234,7 @@ const RES_STEPS = [
 let resStops = [{ name: 'Current', width: 0 }];
 let resApplied = 0; // width of the applied step; 0 = Current (the page's own size)
 let userGpu = false; // the GPU acceleration choice made in Options
+let userCache = true; // the disk cache choice made in Options
 let launched = false;
 
 const pageW = () => Math.max(1, innerWidth);
@@ -703,6 +705,14 @@ async function main() {
   await runChecks();
   // Off by default: in testing, GPU mode drew <canvas> content with red and blue swapped.
   userGpu = saved.gpu ?? false;
+  // Firefox's disk cache lives in its profile, which is only saved on a website running
+  // multi-threaded (OPFS). Anywhere else it would only copy the memory cache into memory.
+  userCache = saved.cache ?? true;
+  const canCache = env.opfs && !env.coop;
+  optCache.checked = userCache && canCache;
+  optCache.disabled = !canCache;
+  $('cache-unavailable').hidden = canCache;
+  optCache.addEventListener('change', () => { if (!optCache.disabled) userCache = optCache.checked; });
   optGpu.addEventListener('change', () => { if (!optGpu.disabled) userGpu = optGpu.checked; });
   // After the checks: a Resolution above Current needs WebGL2 (syncResGpu).
   setupRes(saved);
@@ -761,10 +771,11 @@ async function launch() {
   // Apply is what sets the resolution; an unapplied slider position is dropped.
   optRes.value = String(resAppliedIndex());
   const useGpu = optGpu.checked; // on whenever the Resolution is above Current (syncResGpu)
-  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet, optRes]) el.disabled = true;
+  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet, optCache, optRes]) el.disabled = true;
   renderRes();
   setPhase('booting');
-  const opts = { gpu: userGpu, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, res: resApplied };
+  const opts = { gpu: userGpu, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, cache: userCache, res: resApplied };
+  const useCache = opts.cache && env.opfs && !env.coop;
   saveOpts(opts);
   if (opts.quiet) {
     addVirtualFile(decoded.chromeIndex, QUIET_PREFS_PATH, QUIET_PREFS);
@@ -775,16 +786,22 @@ async function launch() {
   //  - window.open() popups open as tabs: only this one window is drawn.
   //  - Software mode: CSS transform/opacity animations run on the main thread. Gecko hands
   //    them to its compositor otherwise, which never draws in this mode, so they stood still.
+  //  - With the disk cache on, a fixed 256 MB for it: Gecko's smart sizing guesses from the
+  //    free space the wasm file system reports.
   //  - ?pref.NAME=value sets any other startup pref (true/false, a number, or text).
   const urlPrefs = [...new URLSearchParams(location.search)].filter(([k]) => k.startsWith('pref.') && k.length > 5)
     .map(([k, v]) => `pref(${JSON.stringify(k.slice(5))}, ${/^(true|false|-?\d+)$/.test(v) ? v : JSON.stringify(v)});\n`).join('');
   addVirtualFile(decoded.chromeIndex, PAGE_PREFS_PATH, '// Added by proxyfox.html (see app.js).\n' +
     'pref("browser.link.open_newwindow.restriction", 0);\n' +
-    (useGpu ? '' : 'pref("layers.offmainthreadcomposition.async-animations", false);\n') + urlPrefs);
+    (useGpu ? '' : 'pref("layers.offmainthreadcomposition.async-animations", false);\n') +
+    (useCache ? 'pref("browser.cache.disk.smart_size.enabled", false);\npref("browser.cache.disk.capacity", 262144);\n' : '') + urlPrefs);
 
   const engineEnv = { GECKO_CHROME: '1' };
   if (useGpu) Object.assign(engineEnv, { GECKO_GPU: '1', GECKO_GL_PASSTHROUGH: '1', GECKO_WR_DIRECT: '1', GECKO_APZ: '1' });
   if (!opts.jit) engineEnv.GECKO_NOWASMJIT = '1';
+  // Firefox's disk cache (Options): sites visited before load from the profile in OPFS
+  // instead of through the relay again. The engine keeps it off unless this is set.
+  if (useCache) engineEnv.GECKO_DISK_CACHE = '1';
   // Without OPFS (file:// pages) the native OPFS backend cannot start; this
   // documented engine switch keeps the profile on the in-memory WasmFS instead. The same
   // in single-thread mode: OPFS writes need a real Worker (in testing every profile write
