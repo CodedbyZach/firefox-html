@@ -153,6 +153,7 @@ body[data-phase="checking"] .log-card, body[data-phase="decoding"] .log-card { o
 
 footer { color: var(--muted); font-size: 12.5px; }
 footer p { margin: 4px 0; }
+footer .credit { color: var(--text); font-weight: 600; }
 footer details pre { max-height: 260px; overflow: auto; background: var(--code); padding: 10px; border-radius: 6px; white-space: pre-wrap; font-size: 11.5px; }
 
 #screen { display: none; position: fixed; inset: 0; width: 100vw; height: 100vh; border: 0; outline: none; background: #fff; image-rendering: pixelated; }
@@ -244,6 +245,7 @@ body.res-scaled #screen, body.res-scaled #popup-overlay, body.res-scaled [data-l
     </section>
 
     <footer>
+      <p class="credit">Made by CodedbyZach (zmandem7). This page's own code is licensed under the GNU AGPL 3.0; copies and changed versions must keep this credit (Licenses, below).</p>
       <p id="build-info"></p>
       <p>Unofficial build of <a href="https://github.com/HeyPuter/firefox-wasm">HeyPuter/firefox-wasm</a>. Gecko and the Firefox front-end are Mozilla code under the Mozilla Public License 2.0; source: <a href="https://github.com/HeyPuter/firefox">HeyPuter/firefox</a>. Firefox is a trademark of the Mozilla Foundation.</p>
       <details><summary>Licenses</summary><pre id="licenses"><!--LICENSE_TEXT--></pre></details>

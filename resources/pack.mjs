@@ -268,6 +268,12 @@ const depLicense = (pkg) => {
 };
 const rule = (title) => `\n\n==================== ${title} ====================\n\n`;
 const licenseText = [
+  'proxyfox.html: Made by CodedbyZach (zmandem7). Copyright (C) 2026 CodedbyZach (zmandem7).',
+  '  The page\'s own code (the launch page, its loader patches, Resolution, touch, quit and the',
+  '  installable app) is licensed under the GNU AGPL 3.0 (full text below), with an additional term',
+  '  under its section 7(b): any copy or modified version must keep the attribution',
+  '  "Made by CodedbyZach (zmandem7)" visible on its launch page and in these credits.',
+  '',
   'Gecko, the Firefox front-end, and the firefox-wasm embedder/loader:',
   `  Mozilla Public License 2.0. Source: https://github.com/HeyPuter/firefox @ ${manifest.build.geckoCommit}`,
   `  and https://github.com/HeyPuter/firefox-wasm @ ${manifest.build.firefoxWasmCommit}`,
@@ -276,11 +282,11 @@ const licenseText = [
   'zstddec 0.2.0 (bundled): MIT, https://github.com/donmccurdy/zstddec',
   'Icons: Lucide, ISC License, https://lucide.dev',
   rule('Mozilla Public License 2.0 (Gecko, Firefox, firefox-wasm)'), mpl,
-  rule('GNU AGPL 3.0 (@mercuryworkshop/wisp-js)'), depLicense('@mercuryworkshop/wisp-js'),
+  rule('GNU AGPL 3.0 (proxyfox.html\'s own code, @mercuryworkshop/wisp-js)'), depLicense('@mercuryworkshop/wisp-js'),
   rule('MIT (zstddec)'), depLicense('zstddec'),
   rule('ISC (Lucide icons)'), fs.readFileSync(path.join(HERE, 'src', 'licenses', 'lucide-ISC.txt'), 'utf8'),
 ].join('\n');
-const header = `<!-- Gecko ${manifest.build.geckoVersion} compiled to WebAssembly in one file. Unofficial build; Firefox is a trademark of the Mozilla Foundation. Source links and full license texts: Licenses section at the bottom of the page. -->`;
+const header = `<!-- proxyfox.html: Made by CodedbyZach (zmandem7). Gecko ${manifest.build.geckoVersion} compiled to WebAssembly in one file. The page's own code is licensed under the GNU AGPL 3.0 with an attribution term: copies and changed versions must keep "Made by CodedbyZach (zmandem7)". Unofficial build; Firefox is a trademark of the Mozilla Foundation. Source links and full license texts: Licenses section at the bottom of the page. -->`;
 
 const template = fs.readFileSync(path.join(HERE, 'src', 'template.html'), 'utf8');
 const [beforeAssets, afterAssets] = template.split('<!--ASSET_BLOCKS-->');
