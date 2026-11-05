@@ -7,7 +7,7 @@ also be installed as an app that opens from the device.
 
 | File | Purpose |
 | --- | --- |
-| `proxyfox.html` | The single-file browser (80,275,407 bytes). It was called `firefox.html` before. |
+| `proxyfox.html` | The single-file browser (80,288,891 bytes). It was called `firefox.html` before. |
 | `build.sh` | Reproducible build on Linux (Ubuntu 24.04). |
 | `build.ps1` | The same build from PowerShell. On Windows it runs `build.sh` inside WSL 2; on Linux it calls it directly. |
 | `resources/` | What the build scripts use: the packer, the page source (`src/`) and the engine patches (`patches/`). |
@@ -20,7 +20,7 @@ also be installed as an app that opens from the device.
 | Question | Answer |
 | --- | --- |
 | Did the real Firefox engine build? | Yes. Gecko 153.0a1 compiled with emscripten 6.0.1 and Rust 1.95.0, plus the two patches in `resources/patches`. Build ID `20261103131955`. |
-| Final HTML size | 80,275,407 bytes (76.6 MiB). |
+| Final HTML size | 80,288,891 bytes (76.6 MiB). |
 | Does it work from `file://`? | Yes. Opened from disk with no browser flags, Firefox is ready about 4 to 5 s after Launch (Chrome 153). |
 | Does it require a local server? | No. Served from a web server it also works, with or without the two COOP/COEP headers. With them it uses real multi-threading. |
 | Which features work? | See "Tested" below. |
@@ -50,23 +50,64 @@ on all CPU cores instead.
 
 ## Speed
 
-- **Idle:** when nothing on screen changes and there has been no input for 1.5 s, the page asks the
-  engine for a new frame less and less often, down to every 500 ms; any change or input goes back to
-  every frame. A frame identical to the one shown isn't drawn again, nothing is drawn while the tab is
-  hidden, and GPU mode checks for popups on a timer instead of every frame. On a website
-  (multi-threaded) an idle Firefox now costs about 7% of one CPU core instead of 50%; from a file, 3%
-  instead of 6%.
+- **Idle:** when the picture hasn't changed for 250 ms and there has been no input for 1.5 s, the
+  page asks the engine for a new frame less and less often, down to every 500 ms; any change or input
+  goes back to every frame. Nothing is drawn while the tab is hidden, and GPU mode checks for popups on
+  a timer instead of every frame. On a website (multi-threaded) an idle Firefox costs about 6% of one
+  CPU core instead of 50%; from a file, about 3%.
+- **Video and animation:** the 250 ms matters: a 24 or 30 fps video leaves every other frame
+  unchanged, and backing off after one unchanged frame showed 30 fps video at 18 fps. In software mode
+  (the default) CSS transform and fade animations now run on Gecko's main thread
+  (`layers.offmainthreadcomposition.async-animations` off): Gecko gave them to its compositor, which
+  never draws in this mode, so spinners, sliders and menu fades stood still.
+- **Drawing:** when the browser draws WebGL on a GPU, software-mode frames reach the screen through
+  WebGL2: the engine's rows are uploaded as they are, the GPU swaps blue and red, and only the 16-row
+  bands that changed are uploaded. That replaces a JavaScript pass over every pixel and a full
+  `putImageData` per frame (1.7 ms instead of 2.6 ms of page-thread time per 1536x730 frame). On a
+  software WebGL (no GPU, or a blocklisted one) the browser copies every WebGL frame back on the page
+  thread, which measured slower (39% of the page thread for 720p30 video against 18%), so the 2D path
+  stays there. `?env.GECKO_BLIT_2D=1` or `?env.GECKO_BLIT_GL=1` forces one or the other.
+- **Video decoding:** the browser's software video decoder is asked first. Its frames come back as
+  I420 in memory and are copied into the engine in one step; a GPU decoder's frames were read back and
+  converted pixel by pixel on the page thread (11.6 ms per 1080p frame, a third of the page thread at
+  30 fps). If the software decoder can't take a stream (HEVC, say), the default one takes over.
 - **Launch:** the engine (222 MB of WebAssembly) is compiled in the background while the launch page
   is open, so Launch only has to start it. Clicking Launch a few seconds after the page was ready,
   Firefox was ready 1.1 to 1.4 s sooner on a website and 0.8 s sooner from a file on this machine;
   clicked the moment it's enabled, Launch waits for the rest of the compile. The engine's data
   package is handed over in memory, and decoding starts while the startup checks run.
 - **Input:** the canvas position that mouse and touch positions are mapped through is measured once
-  and again on resize, not on every mouse move. The page waits for each command with
-  `Atomics.waitAsync`, which would wake it the moment the engine signals; this engine build only sets
-  the flag, so the page still checks it every 4 ms, as before.
+  and again on resize, not on every mouse move. Clicks and keys go ahead of repaints still waiting
+  in the queue. The page waits for each command with `Atomics.waitAsync`, which would wake it the
+  moment the engine signals; this engine build only sets a flag, so the page checks it every 1 ms
+  (it was every 4 ms).
 - **Startup log:** while Firefox is open, new lines wait and join the log when the launch page comes
   back. The browser's console gets them right away.
+
+## Staying up
+
+- **Leaving the tab:** Gecko's low-resolution clock (socket and timer timeouts read it) was a word in
+  shared memory that a page timer refreshed, and a background tab runs the page's timers once a second
+  at most (once a minute after 5 minutes), so Gecko's clock stood still while you were away and then
+  jumped. A Worker sleeping on `Atomics.wait`, which isn't throttled, writes it now. With the page
+  thread stalled for 3 s, the clock was 3,004 ms behind before and 3 ms behind now.
+- **The relay dropping:** when the relay's WebSocket closed (an idle timeout while you were away, the
+  relay restarting, a network blip, sleep), the dead connection was kept, so no site loaded again until
+  the page was reloaded. The next connection now opens a new one.
+- **The browser unloading the tab:** Chrome's Memory Saver (Edge: sleeping tabs) unloads big
+  background tabs, and coming back reloads the page. The launch page then says so and how to keep the
+  site active.
+- **about:support, about:processes** (Help > More troubleshooting information, the Task Manager) called
+  a native function this engine build doesn't have and aborted an engine thread. They get a stand-in
+  answer for this one process now.
+- **Windows:** only one window is drawn, so New Window (Ctrl+N), New Private Window, the Library
+  (bookmarks, history, downloads) and websites' pop-up windows used to open where nobody could see
+  them. They open as tabs; a private window can't be a tab, so that one is a normal tab with a note,
+  and Page Info says it isn't available.
+- These fixes to the engine's JavaScript glue (`src/glue-patches.js`) are applied when the page loads,
+  so the embedded engine bytes stay as built; the pack checks that each still applies.
+- `?pref.NAME=value` sets a Gecko startup pref (true/false, a number or text), like `?env.NAME=value`
+  sets an engine switch.
 
 ## Hosting it on a website
 
@@ -108,7 +149,7 @@ being downloaded again, offline too.
 
 Chrome 153 (headless), `proxyfox.html` opened as `file://` with no command-line flags, so not cross-origin isolated:
 
-- **Engine:** the real one. Firefox is ready 4.2 to 4.4 s after Launch on this 4-core machine (the
+- **Engine:** the real one. Firefox is ready 3.6 to 3.8 s after Launch on this 4-core machine (the
   engine compiled while the launch page was open), with 0 Web Workers; about 50 engine threads take
   turns on the page thread.
 - **Firefox interface:** tabs, a second tab, the address bar (typing with real key events, Enter
@@ -118,14 +159,27 @@ Chrome 153 (headless), `proxyfox.html` opened as `file://` with no command-line 
   via a local WISP relay, and Gecko rendered its CSS, canvas and PNG image.
 - **Responsiveness:** after boot a page timer fires within a few ms. While booting, the page can pause
   for up to about 1.5 s at a time.
-- **Idle cost:** about 3% of one CPU core and 1.5 GB of memory with Firefox open and idle (6% before
-  the changes under "Speed").
+- **Idle cost:** about 3% of one CPU core and 1.5 GB of memory with Firefox open and idle.
 - **Clean runs:** no page errors. The only requests were the file itself and its own `blob:` URLs (plus
   the WISP relay when one was set).
-- **GPU mode** (off by default): works, with the same `<canvas>` red/blue swap as in the served build.
-- **Served with COOP/COEP** (multi-threaded): Firefox is ready 4.0 to 4.7 s after Launch (5.3 to 5.8 s
-  before), with 44 to 51 Workers, and costs about 7% of one CPU core while idle (50% before). New tab
-  (Ctrl+T) still draws after sitting idle, `about:robots` loads, 0 console errors.
+- **GPU mode** (off by default): works, and pages and images have the right colors, but `<canvas>`
+  content still has red and blue swapped. Five Gecko settings didn't change it (texture swizzling,
+  canvas acceleration on and off, shared canvas buffers, remote canvas); canvas frames reach
+  WebRender another way than images, and fixing that needs an engine rebuild.
+- **Served with COOP/COEP** (multi-threaded): Firefox is ready 3.4 to 3.7 s after Launch, with 43 to
+  62 Workers, and costs about 6% of one CPU core while idle. New tab (Ctrl+T) still draws after sitting
+  idle, `about:robots` loads, 0 console errors.
+- **Animation and video**, software mode, served: a 30 fps animation shows 29.1 new frames a second
+  (15.5 before), a 60 fps CSS animation 59.9 (0 before; from a file 51.5); 720p30 H.264 and VP9 video
+  through a local relay decodes at 30 fps with no drops and reaches the screen at 30 fps (18 to 21
+  before), with the page thread 18 to 20% busy. Colors checked pixel for pixel on the 2D, WebGL2 and
+  GPU paths.
+- **Staying up:** with the page thread stalled for 3 s, Gecko's clock stayed 3 ms behind; after the
+  relay restarted, sites loaded again; about:support and about:processes open without an abort; New
+  Window, New Private Window and the Library open as tabs (one window the whole time). Settings with
+  all its panes, Add-ons, about:config, about:logins, about:downloads, the history sidebar, the
+  downloads panel, the find bar, view source and print ran with the engine alive afterwards, served in
+  software and GPU mode.
 - **Served without headers, like GitHub Pages:** single-threaded, the profile kept in memory, 0 errors.
 - **Resolution** (Options, Current up to 4K): Firefox keeps its size and is drawn with more pixels
   (Gecko's device pixel ratio set to the step). On a 125% display, 1080p is 1:1 with the screen and
@@ -174,7 +228,9 @@ Chrome 153 (headless), `proxyfox.html` opened as `file://` with no command-line 
 - From `file://` the profile lives in memory (browser storage for files is limited), so cookies and
   history are gone after a reload. On a website running multi-threaded, the profile is stored in OPFS;
   single-threaded it stays in memory too (OPFS writes need a real Worker).
-- File pickers, Save As and playback-speed changes are stubbed out in this engine build.
+- File pickers, Save As and playback-speed changes are stubbed out in this engine build: a file
+  picker simply doesn't open.
+- Only one window is drawn: private windows and Page Info aren't available (see "Staying up").
 - Resolution above Current turns on GPU rendering, with its `<canvas>` color swap: this engine build's
   software renderer paints one pixel per CSS pixel at any pixel ratio (`embed-paint.cpp`). Without
   WebGL2 only Current is offered. Fixing the software renderer needs an engine rebuild.
@@ -191,7 +247,10 @@ Chrome 153 (headless), `proxyfox.html` opened as `file://` with no command-line 
   was tested with a relay on the build machine, which Firefox loaded a site through. A relay has to
   accept pages opened as files (they connect with `Origin: null`).
 - Real websites (the build machine's network blocks them).
-- Audio and video.
+- Audio output, and video decoded by a GPU (the build machine has none, so the browser decoded in
+  software there, which is the path this build now asks for first).
+- A background tab in a real browser window: the test browser keeps every tab visible, so the clock
+  fix was tested by stalling the page thread instead.
 - `build.ps1` on real Windows. It was run under PowerShell 7 with a simulated WSL.
 - Chrome moving an already-installed app to the new start address `proxyfox.html` (it updates installed
   apps' manifests by itself, at most once a day); until then the old address is sent on.
@@ -271,9 +330,12 @@ The page side is in `resources/`:
 - `coop-glue.mjs`: pack-time edits to the emscripten glue, each an exact match that stops the pack if
   emscripten's output changes.
 - `coop-loader.mjs`: a hash of every frame and the time of the last input, in upstream's loader.
-- `speed-loader.mjs`: the changes under "Speed" in upstream's loader: the repaint policy, skipping
-  unchanged frames, the engine compiled in advance (handed over by `src/app.js` through
+- `speed-loader.mjs`: the changes under "Speed" in upstream's loader: the repaint policy, WebGL2
+  drawing (`createGlBlit`) or skipping unchanged frames in 2D, input ahead of repaints, 1 ms command
+  checks, the engine compiled in advance (handed over by `src/app.js` through
   `src/embedded-assets.js`), the data package in memory and the measured canvas position.
+- `src/glue-patches.js`: the load-time fixes to the emscripten glue under "Staying up" and "Video
+  decoding" (the clock Worker, relay reconnect, the software video decoder first).
 - `resolution-loader.mjs`: input for the Resolution option in upstream's loader: mouse positions in
   CSS pixels, wheel deltas in device pixels, and presses while a menu is open (above a pixel ratio of
   1 the engine's own "click outside a popup" test mixes the two, so the page does that test).
@@ -281,6 +343,7 @@ The page side is in `resources/`:
   page turns finger drags into scrolling through the engine's wheel path (`touchScroll()`).
 - `src/app.js` ("quit"): answers Firefox's quit requests in the chrome window, so quitting returns to
   the launch page with Firefox still loaded (a real quit would leave the engine with no window).
+  `BROWSER_FIXES` there is the about:support stand-in and the windows that open as tabs.
 
 ### What the build does (phases 1 to 4)
 
