@@ -44,6 +44,10 @@
   }
 }
 * { box-sizing: border-box; }
+/* Anything marked hidden stays hidden. Rules that set display (like .opt-grid small, the notes
+   under each option) otherwise override it, which showed notes such as "Not available here" when
+   they didn't apply. */
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg);
