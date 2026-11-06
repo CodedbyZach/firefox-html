@@ -22,11 +22,12 @@ const splash = $('splash');
 const logBox = $('log');
 const launchBtn = $('launch');
 const optGpu = $('opt-gpu');
-const optJit = $('opt-jit');
+const optGame = $('opt-game');
 const optWisp = $('opt-wisp');
 const optStart = $('opt-start');
 const optQuiet = $('opt-quiet');
 const optCache = $('opt-cache');
+const optUblock = $('opt-ublock');
 const optRes = $('opt-res');
 const resApply = $('res-apply');
 const resCancel = $('res-cancel');
@@ -38,6 +39,32 @@ const resCancel = $('res-cancel');
 // in-memory front-end, so Gecko keeps them local. Pages you open are unaffected.
 const QUIET_PREFS_PATH = 'browser/defaults/preferences/zz-firefox-html-quiet.js';
 const PAGE_PREFS_PATH = 'browser/defaults/preferences/zz-firefox-html-page.js';
+// Firefox's settings (prefs.js). This engine never reads prefs.js from the profile at startup,
+// and only writes it when given the file, so every setting changed in Firefox (and
+// add-ons' internal IDs, which name their storage) was forgotten at the next launch. Where
+// the profile is saved (OPFS), PREFS_SAVER writes prefs.js after changes, and launch()
+// reads it back into Firefox as this startup prefs file.
+const SAVED_PREFS_PATH = 'browser/defaults/preferences/zzz-firefox-html-saved.js';
+async function readSavedPrefs() {
+  try {
+    const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('profile');
+    const text = await (await (await dir.getFileHandle('prefs.js')).getFile()).text();
+    const lines = text.split('\n').filter((l) => l.startsWith('user_pref('));
+    return lines.length ? '// Added by proxyfox.html: the profile\'s prefs.js (see app.js).\n' + lines.join('\n') + '\n' : null;
+  } catch {
+    return null; // no saved profile yet
+  }
+}
+const PREFS_SAVER = `(() => {
+  const file = Services.dirsvc.get('ProfD', Ci.nsIFile);
+  file.append('prefs.js');
+  let timer = 0;
+  const save = () => { timer = 0; try { Services.prefs.savePrefFile(file); } catch (e) { dump('[proxyfox.html] saving prefs.js failed: ' + e + '\\n'); } };
+  Services.prefs.addObserver('', { observe() { if (!timer) timer = setTimeout(save, 2000); } });
+  window.__proxyfoxSavePrefs = save;
+  save();
+  return 'ok';
+})()`;
 const QUIET_PREFS = `// Added by proxyfox.html: "Block Firefox's background calls to Mozilla".
 pref("services.settings.server", "data:,#remote-settings-dummy/v1");
 pref("browser.region.network.url", "");
@@ -45,9 +72,9 @@ pref("browser.region.update.enabled", false);
 pref("network.captive-portal-service.enabled", false);
 pref("network.connectivity-service.enabled", false);
 `;
-function addVirtualFile(index, filePath, text) {
+function addVirtualFile(index, filePath, content) {
   const parts = filePath.split('/');
-  index.files.set(filePath, new TextEncoder().encode(text));
+  index.files.set(filePath, typeof content === 'string' ? new TextEncoder().encode(content) : content);
   let dir = '';
   for (let i = 0; i < parts.length; i++) {
     if (!index.dirs.has(dir)) index.dirs.set(dir, new Set());
@@ -258,12 +285,123 @@ const resAppliedIndex = () => (env.webgl2 ? resIndexFor(resApplied) : 0);
 // Above Current the extra pixels have to come from the GPU renderer (WebRender): this
 // engine build's software renderer paints one pixel per CSS pixel at any ratio
 // (embed-paint.cpp, RenderDocument). So a Resolution above Current turns GPU acceleration
-// on and locks it; Current gives back the choice made in Options.
+// on and locks it; so does Improve Gaming Performance when the GPU is fast (measureGpu).
+// Otherwise the choice made in Options stands.
 function syncResGpu() {
   const forced = resAppliedIndex() !== 0;
-  optGpu.checked = env.webgl2 && (forced || userGpu);
-  optGpu.disabled = !env.webgl2 || forced || launched;
+  const byGame = !forced && optGame.checked && env.webgl2 && measureGpu().fast;
+  optGpu.checked = env.webgl2 && (forced || byGame || userGpu);
+  optGpu.disabled = !env.webgl2 || forced || byGame || launched;
   $('gpu-forced').hidden = !forced;
+  $('gpu-game').hidden = !byGame;
+  renderGameGpu();
+}
+
+// ------------------------------------------------------------------- game --
+// Improve Gaming Performance (the switch between Options and Launch): the engine's JS to
+// wasm JIT, WebGL for websites in either drawing mode, and the GPU when it beats drawing in
+// software. The JIT is off otherwise because it compiles code as pages load, which made
+// one-shot page loads slower in testing, while game code that runs every frame got faster.
+//
+// The GPU: a browser with no usable GPU (or a blocklisted one) draws WebGL in software
+// (SwiftShader, llvmpipe), which is slower than the engine's own software renderer, and
+// many Chromebooks have weak GPUs. So the GPU is used only when it is a hardware GPU
+// (failIfMajorPerformanceCaveat, the renderer's name) that also passes a short fill-rate
+// test; otherwise drawing stays on the CPU.
+const SOFTWARE_GL = /swiftshader|llvmpipe|softpipe|software|basic render|microsoft warp/i;
+const GPU_MIN_MPIX = 400; // blended fill, in megapixels per second (integrated GPUs reach 1000+)
+let gpuResult = null;
+function measureGpu() {
+  if (gpuResult) return gpuResult;
+  gpuResult = (() => {
+    if (!env.webgl2) return { fast: false, why: 'this browser has no WebGL2' };
+    let gl = null;
+    try {
+      const size = 1024;
+      gl = new OffscreenCanvas(size, size).getContext('webgl2', {
+        failIfMajorPerformanceCaveat: true, antialias: false, depth: false, stencil: false, powerPreference: 'high-performance',
+      });
+      if (!gl) return { fast: false, why: 'no hardware GPU is available to this browser' };
+      const info = gl.getExtension('WEBGL_debug_renderer_info');
+      const raw = String((info && gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) || gl.getParameter(gl.RENDERER) || '');
+      // "ANGLE (Intel, Intel(R) UHD Graphics 600 (0x00003185) Direct3D11 ...)" -> "Intel(R) UHD Graphics 600"
+      const renderer = raw.replace(/^ANGLE \([^,]*,\s*/, '').replace(/\s*\(0x[0-9a-f]+\).*$/i, '').replace(/,.*$/, '').replace(/\)$/, '').trim() || 'your GPU';
+      const soft = raw.match(SOFTWARE_GL);
+      if (soft) return { fast: false, renderer: soft[0], why: `no hardware GPU is available to this browser, so it draws WebGL in software (${/swiftshader/i.test(soft[0]) ? 'SwiftShader' : soft[0]})` };
+      const shader = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+      const prog = gl.createProgram();
+      gl.attachShader(prog, shader(gl.VERTEX_SHADER, '#version 300 es\nvoid main() { vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4.0 - 1.0; gl_Position = vec4(p, 0.0, 1.0); }'));
+      gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, '#version 300 es\nprecision mediump float; out vec4 o; void main() { o = vec4(fract(gl_FragCoord.xy / 64.0), 0.5, 0.3); }'));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return { fast: false, renderer, why: 'the GPU test could not run' };
+      gl.useProgram(prog);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      const px = new Uint8Array(4);
+      const draw = (n) => { for (let i = 0; i < n; i++) gl.drawArrays(gl.TRIANGLES, 0, 3); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); };
+      draw(2); // warm-up: shader compile and first allocation
+      let n = 8, ms = 0;
+      for (;;) {
+        const t0 = performance.now();
+        draw(n);
+        ms = performance.now() - t0;
+        if (ms >= 20 || n >= 2048) break;
+        n *= 2;
+      }
+      const mpix = Math.round((n * size * size) / (Math.max(ms, 0.1) * 1000));
+      return mpix >= GPU_MIN_MPIX ? { fast: true, renderer, mpix } : { fast: false, renderer, mpix, why: `${renderer} is slower than drawing in software` };
+    } catch (e) {
+      return { fast: false, why: 'the GPU test failed (' + e.message + ')' };
+    } finally {
+      gl?.getExtension('WEBGL_lose_context')?.loseContext();
+    }
+  })();
+  console.log('[proxyfox.html] gaming GPU check:', JSON.stringify(gpuResult));
+  return gpuResult;
+}
+function renderGameGpu() {
+  const el = $('game-gpu');
+  if (!optGame.checked) { el.hidden = true; return; }
+  const g = measureGpu();
+  const forced = resAppliedIndex() !== 0;
+  el.textContent = g.fast ? `Draws with your GPU (${g.renderer}): it is faster than drawing in software.`
+    : forced || userGpu ? `GPU acceleration is on because you chose it in Options (${g.why}).`
+      : `Drawing stays on the CPU: ${g.why}.`;
+  el.hidden = false;
+}
+function setupGame() {
+  optGame.addEventListener('change', () => { if (!optGame.disabled) syncResGpu(); });
+}
+
+// ------------------------------------------------------------------ crash --
+// When the engine stops with an error (an abort, or one of its threads crashing), say so
+// instead of leaving a frozen picture, and offer a reload. If Improve Gaming Performance
+// was on, also offer one without it: its JIT is experimental.
+let crashed = false;
+let launchedWithGame = false;
+const ENGINE_FATAL = /^Aborted\(|sent an error!|onmessage\(\) captured an uncaught exception/;
+function engineCrashed(what) {
+  if (crashed || !launched) return;
+  crashed = true;
+  console.error('[proxyfox.html] the engine stopped:', what);
+  $('crash-text').textContent = launchedWithGame
+    ? 'The engine ran into an error while Improve Gaming Performance was on. Its JIT is experimental and can break some websites, so you can reload without it.'
+    : "The engine ran into an error and can't continue. Reload the page to start Firefox again.";
+  $('crash-nogame').hidden = !launchedWithGame;
+  $('quit').hidden = true;
+  $('crash').hidden = false;
+  ($(launchedWithGame ? 'crash-nogame' : 'crash-reload')).focus();
+}
+function setupCrashDialog() {
+  $('crash-reload').addEventListener('click', () => location.reload());
+  $('crash-nogame').addEventListener('click', () => {
+    const o = loadOpts();
+    o.game = false;
+    saveOpts(o);
+    location.reload();
+  });
+  addEventListener('error', (e) => { if (e.error instanceof WebAssembly.RuntimeError) engineCrashed(String(e.error.message)); });
+  addEventListener('unhandledrejection', (e) => { if (e.reason instanceof WebAssembly.RuntimeError) engineCrashed(String(e.reason.message)); });
 }
 
 function renderRes() {
@@ -358,6 +496,48 @@ const QUIT_HANDLER = `(() => {
   addEventListener('unload', () => say('closed'));
   return 'ok';
 })()`;
+// uBlock Origin comes preinstalled. Its files (pack.mjs: the ublock.tar asset) go into the
+// front-end next to Firefox's own built-in add-ons, at resource://builtin-addons/proxyfox-ublock/,
+// and from there Firefox installs it as a built-in add-on, the way it installs its own: no
+// Mozilla signature is needed, it stays installed in a saved profile (a newer bundled version
+// replaces it), and it can be turned off in Add-ons. (A resource line of its own in the app's
+// chrome.manifest instead made the engine's memory balloon to 3.8 GB, even with it off.)
+const UBLOCK_DIR = 'browser/chrome/browser/builtin-addons/proxyfox-ublock';
+const UBLOCK_URL = 'resource://builtin-addons/proxyfox-ublock/';
+function addUblock(index, ublockIndex) {
+  for (const [p, bytes] of ublockIndex.files) addVirtualFile(index, `${UBLOCK_DIR}/${p}`, bytes);
+}
+// Options > "Block ads with uBlock Origin" off: it isn't installed, or one installed before is
+// turned off (and the profile remembers that the launch page did it, so turning the option
+// back on turns it back on; one turned off in Add-ons stays off).
+const ublockInstall = ({ id, version }, on) => `(() => {
+  const { AddonManager } = ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs');
+  const say = (m) => dump('[proxyfox.html] uBlock Origin: ' + m + '\\n');
+  const OFF_PREF = 'proxyfox.ublock.offFromLaunchPage';
+  (async () => {
+    const had = await AddonManager.getAddonByID(${JSON.stringify(id)});
+    if (!${on}) {
+      if (had && had.isActive) { await had.disable(); Services.prefs.setBoolPref(OFF_PREF, true); }
+      return say(had ? 'turned off (Options)' : 'not installed (Options)');
+    }
+    const a = (await AddonManager.maybeInstallBuiltinAddon(${JSON.stringify(id)}, ${JSON.stringify(version)}, ${JSON.stringify(UBLOCK_URL)})) || had;
+    if (a && !a.isActive && Services.prefs.getBoolPref(OFF_PREF, false)) await a.enable();
+    Services.prefs.clearUserPref(OFF_PREF);
+    say(!a ? 'not installed' : (a === had ? a.version + ' installed' : 'installed ' + a.version) + (a.userDisabled ? ', turned off in Add-ons' : ''));
+    // First setup: its filter lists take about a minute to prepare, during which Firefox
+    // pauses now and then. Say so, so it isn't taken for a crash.
+    if (a && !had) {
+      try {
+        gNotificationBox.appendNotification('proxyfox-ublock', {
+          label: 'uBlock Origin is setting up its filter lists, which takes about a minute. Firefox may stop responding for a while until it is done; later launches are quicker.',
+          priority: gNotificationBox.PRIORITY_INFO_MEDIUM,
+        }, []);
+      } catch (e) {}
+    }
+  })().catch((e) => say('install failed: ' + e));
+  return 'ok';
+})()`;
+
 // Fixes inside Firefox's window for things this engine build can't do (installed after boot).
 //  - about:support and about:processes call ChromeUtils.requestProcInfo(), which reaches
 //    GetProcInfoSync, a native function this build doesn't have: it aborted the thread that
@@ -462,7 +642,9 @@ function setupQuitDialog() {
   });
 }
 const engineOutput = (s) => {
-  if (typeof s === 'string' && s.includes(QUIT_MARK)) firefoxQuit(s.includes(`${QUIT_MARK} closed`) ? 'closed' : 'quit');
+  if (typeof s !== 'string') return;
+  if (s.includes(QUIT_MARK)) firefoxQuit(s.includes(`${QUIT_MARK} closed`) ? 'closed' : 'quit');
+  else if (ENGINE_FATAL.test(s)) engineCrashed(s);
 };
 
 // -------------------------------------------------------------------- app --
@@ -547,7 +729,7 @@ async function verify(name, bytes, expected, what) {
 const decoded = {};
 async function decodeAssets() {
   const A = manifest.assets;
-  const order = ['gecko.js', 'gecko.data', 'chrome-assets.tar', 'gecko.wasm'];
+  const order = ['gecko.js', 'gecko.data', 'chrome-assets.tar', 'gecko.wasm', ...(A['ublock.tar'] ? ['ublock.tar'] : [])];
   // gecko.data stays compressed here: index.ts zstd-decodes it in getPreloadedPackage.
   const inflateHere = (n) => A[n].compression === 'zstd' && n !== 'gecko.data';
   const total = order.reduce((s, n) => s + A[n].stored + (inflateHere(n) ? A[n].size : 0), 0);
@@ -591,6 +773,9 @@ async function decodeAssets() {
       decoded.chromeIndex = index;
       decoded.chromeFs = makeTarProvider(index);
       decoded.chromeFiles = index.files.size;
+    } else if (name === 'ublock.tar') {
+      addUblock(decoded.chromeIndex, indexTar(raw));
+      decoded.chromeFiles = decoded.chromeIndex.files.size;
     } else if (name === 'gecko.wasm') {
       // application/wasm so index.ts can WebAssembly.instantiateStreaming() it.
       decoded.wasmUrl = URL.createObjectURL(new Blob([raw], { type: 'application/wasm' }));
@@ -683,6 +868,7 @@ async function refreshWisp() {
 
 async function main() {
   setupQuitDialog();
+  setupCrashDialog();
   setupApp();
   // Chrome's Memory Saver (Edge: sleeping tabs) unloads big background tabs; coming back
   // reloads the page, which looked like Firefox breaking. Say what happened and how to stop it.
@@ -691,7 +877,8 @@ async function main() {
   // An empty saved value (e.g. from a build without a default relay) falls back to the default.
   optWisp.value = saved.wisp || defaultWispUrl();
   optStart.value = saved.start ?? '';
-  optJit.checked = saved.jit ?? false;
+  // Improve Gaming Performance replaced the "Experimental JS to WASM JIT" option (saved as jit).
+  optGame.checked = saved.game ?? saved.jit ?? false;
   optQuiet.checked = saved.quiet ?? true;
   $('build-info').textContent = `Gecko ${manifest.build.geckoVersion} (HeyPuter/firefox @ ${manifest.build.geckoCommit.slice(0, 10)}), firefox-wasm @ ${manifest.build.firefoxWasmCommit.slice(0, 10)}, emscripten ${manifest.build.emscripten}, built ${manifest.build.date}`;
 
@@ -708,12 +895,20 @@ async function main() {
   // Firefox's disk cache lives in its profile, which is only saved on a website running
   // multi-threaded (OPFS). Anywhere else it would only copy the memory cache into memory.
   userCache = saved.cache ?? true;
+  // uBlock Origin is on by default where the profile is saved, so its filter lists are set up
+  // once (a file on disk or single-thread mode would set them up at every launch, about a
+  // minute of pauses each time), and where the device has the memory: in testing, preparing
+  // them took the engine from 0.7 GB to about 3 GB. navigator.deviceMemory is the device's
+  // RAM in GB, rounded and capped at 8.
+  optUblock.checked = saved.ublock ?? (env.opfs && !env.coop && (navigator.deviceMemory || 0) >= 8);
+  optUblock.disabled = !manifest.build.ublock;
   const canCache = env.opfs && !env.coop;
   optCache.checked = userCache && canCache;
   optCache.disabled = !canCache;
   $('cache-unavailable').hidden = canCache;
   optCache.addEventListener('change', () => { if (!optCache.disabled) userCache = optCache.checked; });
-  optGpu.addEventListener('change', () => { if (!optGpu.disabled) userGpu = optGpu.checked; });
+  optGpu.addEventListener('change', () => { if (!optGpu.disabled) { userGpu = optGpu.checked; renderGameGpu(); } });
+  setupGame();
   // After the checks: a Resolution above Current needs WebGL2 (syncResGpu).
   setupRes(saved);
   if ((env.threads.ok || env.coop) && env.jspi) {
@@ -770,13 +965,18 @@ async function launch() {
   launchBtn.querySelector('span').textContent = 'Starting Firefox';
   // Apply is what sets the resolution; an unapplied slider position is dropped.
   optRes.value = String(resAppliedIndex());
-  const useGpu = optGpu.checked; // on whenever the Resolution is above Current (syncResGpu)
-  for (const el of [optGpu, optJit, optWisp, optStart, optQuiet, optCache, optRes]) el.disabled = true;
+  const useGpu = optGpu.checked; // also on for a Resolution above Current, or gaming with a fast GPU (syncResGpu)
+  for (const el of [optGpu, optGame, optWisp, optStart, optQuiet, optCache, optUblock, optRes]) el.disabled = true;
   renderRes();
   setPhase('booting');
-  const opts = { gpu: userGpu, jit: optJit.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, cache: userCache, res: resApplied };
+  const opts = { gpu: userGpu, game: optGame.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, cache: userCache, ublock: optUblock.checked, res: resApplied };
   const useCache = opts.cache && env.opfs && !env.coop;
+  // The profile is saved only on the website running multi-threaded (OPFS).
+  const savedProfile = env.opfs && !env.coop;
+  const savedPrefs = savedProfile ? await readSavedPrefs() : null;
+  if (savedPrefs) addVirtualFile(decoded.chromeIndex, SAVED_PREFS_PATH, savedPrefs);
   saveOpts(opts);
+  launchedWithGame = opts.game;
   if (opts.quiet) {
     addVirtualFile(decoded.chromeIndex, QUIET_PREFS_PATH, QUIET_PREFS);
     console.log(`[proxyfox.html] background Mozilla calls blocked via /gre/${QUIET_PREFS_PATH}`);
@@ -798,7 +998,11 @@ async function launch() {
 
   const engineEnv = { GECKO_CHROME: '1' };
   if (useGpu) Object.assign(engineEnv, { GECKO_GPU: '1', GECKO_GL_PASSTHROUGH: '1', GECKO_WR_DIRECT: '1', GECKO_APZ: '1' });
-  if (!opts.jit) engineEnv.GECKO_NOWASMJIT = '1';
+  // Improve Gaming Performance: the JIT, and websites' WebGL on real WebGL contexts of this
+  // browser (GPU mode always has that; in software mode the frames are read back and drawn
+  // with the rest of the page). Without it the JIT is off and software mode has no WebGL.
+  if (opts.game) engineEnv.GECKO_GL_PASSTHROUGH = '1';
+  else engineEnv.GECKO_NOWASMJIT = '1';
   // Firefox's disk cache (Options): sites visited before load from the profile in OPFS
   // instead of through the relay again. The engine keeps it off unless this is set.
   if (useCache) engineEnv.GECKO_DISK_CACHE = '1';
@@ -861,6 +1065,15 @@ async function launch() {
     if (q !== 'ok') console.warn('[proxyfox.html] quit handler not installed:', q);
     const f = await gecko.evalChrome(BROWSER_FIXES);
     if (!/^ok/.test(f)) console.warn('[proxyfox.html] browser fixes not installed:', f);
+    if (savedProfile) {
+      const p = await gecko.evalChrome(PREFS_SAVER).catch((e) => String(e));
+      if (p !== 'ok') console.warn('[proxyfox.html] Firefox settings will not be saved:', p);
+      else console.log(`[proxyfox.html] Firefox settings: ${savedPrefs ? 'read back from prefs.js, ' : ''}saved to prefs.js when they change`);
+    }
+    if (manifest.build.ublock && decoded.chromeIndex.files.has(`${UBLOCK_DIR}/manifest.json`)) {
+      const u = await gecko.evalChrome(ublockInstall(manifest.build.ublock, opts.ublock)).catch((e) => String(e));
+      if (u !== 'ok') console.warn('[proxyfox.html] uBlock Origin:', u);
+    }
     if (res.scale !== 1) {
       const r = await gecko.evalChrome(RES_PRESS_HANDLER);
       if (r !== 'ok') console.warn('[proxyfox.html] resolution: popup press handler not installed:', r);

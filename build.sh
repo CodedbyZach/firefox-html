@@ -13,6 +13,9 @@
 #   ./build.sh engine     upstream build: make emsdk firefox vendor, apply resources/patches,
 #                         make web, make chrome-assets
 #   ./build.sh pack       resources/pack.mjs -> proxyfox.html
+#   ./build.sh ublock     rebuild the preinstalled uBlock Origin (resources/ublock/) from its source
+#                         at the pinned commits (the repository already includes it, so only
+#                         needed to update it; set UBLOCK_REF and UASSETS_*_REF to move them)
 #
 # Environment: REPO (existing firefox-wasm checkout), FIREFOX_WASM_REF, and WISP_URL (the default
 # WISP relay baked into proxyfox.html; wss://itcode.vip/api/ when unset, WISP_URL= for none).
@@ -27,6 +30,10 @@ RUST_VERSION="1.95.0"
 CBINDGEN_VERSION="0.29.4"
 LIBCLANG_VERSION="20"
 PNPM_VERSION="9.12.0"
+# uBlock Origin 1.75.4 and its default filter lists (resources/ublock/ublock.json records them).
+UBLOCK_REF="${UBLOCK_REF:-f417911934edb2d3e2700110803ed7fde6f51022}"
+UASSETS_MAIN_REF="${UASSETS_MAIN_REF:-bdf05d40f0a7f0d20bace4a6c00c91ef78095068}"
+UASSETS_PROD_REF="${UASSETS_PROD_REF:-38bc9c36137adf4fd13db032d9f3851d9187e569}"
 
 step() { printf '\n==> %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
@@ -154,6 +161,25 @@ engine() {
   ls -la "$REPO/gecko.js/wasm" "$REPO/demo/chrome/public"
 }
 
+# A checkout of $1 at commit $3 in $2 (shallow: just that commit).
+fetch_at() {
+  mkdir -p "$2"
+  [ -d "$2/.git" ] || git -C "$2" init -q
+  git -C "$2" fetch -q --depth 1 "$1" "$3"
+  git -C "$2" checkout -q --detach FETCH_HEAD
+}
+
+ublock() {
+  node -e 'const z = require("zlib"); process.exit(typeof z.zstdCompressSync === "function" ? 0 : 1)' ||
+    die "Node.js 22.15 or newer is required for ./build.sh ublock (zstd in node:zlib)"
+  step "uBlock Origin @ ${UBLOCK_REF:0:10} -> resources/ublock/"
+  fetch_at https://github.com/gorhill/uBlock "$HERE/work/ublock/uBlock" "$UBLOCK_REF"
+  fetch_at https://github.com/uBlockOrigin/uAssets "$HERE/work/ublock/uAssets-main" "$UASSETS_MAIN_REF"
+  fetch_at https://github.com/uBlockOrigin/uAssets "$HERE/work/ublock/uAssets-prod" "$UASSETS_PROD_REF"
+  node "$RES/make-ublock.mjs" --src "$HERE/work/ublock/uBlock" \
+    --assets-main "$HERE/work/ublock/uAssets-main" --assets-prod "$HERE/work/ublock/uAssets-prod"
+}
+
 pack() {
   node_ok || die "Node.js 18+ is required (./build.sh deps installs it)"
   [ -d "$RES/node_modules/esbuild" ] || (cd "$RES" && npm install --no-audit --no-fund)
@@ -166,6 +192,7 @@ case "${1:-all}" in
   clone) clone ;;
   engine) preflight; engine ;;
   pack) pack ;;
+  ublock) ublock ;;
   all) preflight; deps; clone; engine; pack ;;
-  *) die "usage: $0 [all|deps|clone|engine|pack]" ;;
+  *) die "usage: $0 [all|deps|clone|engine|pack|ublock]" ;;
 esac

@@ -1,0 +1,12 @@
+{
+  "id": "uBlock0@raymondhill.net",
+  "version": "1.75.4",
+  "files": 655,
+  "tarSize": 27300864,
+  "tarSha256": "0b271baf43f0ed79b89b20d2f1079bf9a761c3960b8ecda9b7b8cc84569a8895",
+  "sources": {
+    "gorhill/uBlock": "f417911934edb2d3e2700110803ed7fde6f51022",
+    "uBlockOrigin/uAssets master": "bdf05d40f0a7f0d20bace4a6c00c91ef78095068",
+    "uBlockOrigin/uAssets gh-pages": "38bc9c36137adf4fd13db032d9f3851d9187e569"
+  }
+}

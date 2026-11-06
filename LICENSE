@@ -26,6 +26,10 @@ Third-party code keeps its own license (full texts in the Licenses section of pr
   - @mercuryworkshop/wisp-js (bundled into the page): GNU Affero General Public License 3.0.
   - zstddec (bundled into the page): MIT License.
   - Lucide icons (in the page and in icons/): ISC License.
+  - uBlock Origin (resources/ublock/, preinstalled in the page): GNU General Public License 3.0,
+    by Raymond Hill and contributors (https://github.com/gorhill/uBlock). Its bundled filter lists
+    keep their own terms: uBlock filters (GPL-3.0), EasyList and EasyPrivacy (GPL-3.0 or
+    CC BY-SA 3.0), Peter Lowe's list, URLhaus filter (CC0 1.0) and the Public Suffix List (MPL-2.0).
 
 Firefox is a trademark of the Mozilla Foundation. This is an unofficial build.
 

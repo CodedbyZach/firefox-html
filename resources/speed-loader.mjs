@@ -18,6 +18,7 @@
 //  - Launch: the engine module can be compiled by the page while its launch page is open
 //    (app.js, through embedded-assets.js); instantiating it then skips the compile.
 //    gecko.data is handed over as bytes instead of a blob URL to fetch.
+//  - Memory above 2 GB: the engine's result pointer is read unsigned (see the last patches).
 //  - Input: the canvas box that positions are mapped through is measured once and again on
 //    resize, not on every mouse move. Input goes ahead of repaints still waiting in the
 //    queue. A command's completion is awaited with Atomics.waitAsync, which would wake at
@@ -374,6 +375,20 @@ const patches = (embedded) => [
     name: 'createGlBlit helper',
     from: 'export class Gecko {\n',
     to: GL_BLIT + 'export class Gecko {\n',
+  },
+  // The engine's heap can grow past 2 GB (to 4 GB). Its result pointer was read as a signed
+  // 32-bit number, so above 2 GB it was negative: a frame's view of the heap threw "Start
+  // offset ... is outside the bounds of the buffer" (stopping the page's paint loop) and a
+  // command's text result came from the wrong place. Read the pointer and length unsigned.
+  {
+    name: 'command results above 2 GB',
+    from: '      const resPtr = i32()[(this.cmd + RES) >> 2], len = i32()[(this.cmd + LEN) >> 2];\n',
+    to: '      const resPtr = i32()[(this.cmd + RES) >> 2] >>> 0, len = i32()[(this.cmd + LEN) >> 2] >>> 0;\n',
+  },
+  {
+    name: 'frames above 2 GB',
+    from: '    const resPtr = i32[(this.cmd + RES) >> 2], len = i32[(this.cmd + LEN) >> 2];\n',
+    to: '    const resPtr = i32[(this.cmd + RES) >> 2] >>> 0, len = i32[(this.cmd + LEN) >> 2] >>> 0;\n',
   },
 ];
 
