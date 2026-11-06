@@ -523,7 +523,8 @@ const ublockInstall = ({ id, version }, on) => `(() => {
     const a = (await AddonManager.maybeInstallBuiltinAddon(${JSON.stringify(id)}, ${JSON.stringify(version)}, ${JSON.stringify(UBLOCK_URL)})) || had;
     if (a && !a.isActive && Services.prefs.getBoolPref(OFF_PREF, false)) await a.enable();
     Services.prefs.clearUserPref(OFF_PREF);
-    say(!a ? 'not installed' : (a === had ? a.version + ' installed' : 'installed ' + a.version) + (a.userDisabled ? ', turned off in Add-ons' : ''));
+    // (Right after a fresh install the add-on can still read as disabled while it starts.)
+    say(!a ? 'not installed' : a === had ? a.version + ' installed' + (a.userDisabled ? ', turned off in Add-ons' : '') : 'installed ' + a.version);
     // First setup: its filter lists take about a minute to prepare, during which Firefox
     // pauses now and then. Say so, so it isn't taken for a crash.
     if (a && !had) {
@@ -895,12 +896,11 @@ async function main() {
   // Firefox's disk cache lives in its profile, which is only saved on a website running
   // multi-threaded (OPFS). Anywhere else it would only copy the memory cache into memory.
   userCache = saved.cache ?? true;
-  // uBlock Origin is on by default where the profile is saved, so its filter lists are set up
-  // once (a file on disk or single-thread mode would set them up at every launch, about a
-  // minute of pauses each time), and where the device has the memory: in testing, preparing
-  // them took the engine from 0.7 GB to about 3 GB. navigator.deviceMemory is the device's
-  // RAM in GB, rounded and capped at 8.
-  optUblock.checked = saved.ublock ?? (env.opfs && !env.coop && (navigator.deviceMemory || 0) >= 8);
+  // uBlock Origin is off until it is turned on here: preparing its filter lists pauses Firefox
+  // (about a minute the first time) and took the engine from 0.7 GB to about 3 GB of its 4 GB
+  // in testing. The choice is saved as ublockOptIn: the "ublock" value that earlier builds
+  // saved was their default (on), not a choice, so it no longer counts.
+  optUblock.checked = saved.ublockOptIn ?? false;
   optUblock.disabled = !manifest.build.ublock;
   const canCache = env.opfs && !env.coop;
   optCache.checked = userCache && canCache;
@@ -969,7 +969,7 @@ async function launch() {
   for (const el of [optGpu, optGame, optWisp, optStart, optQuiet, optCache, optUblock, optRes]) el.disabled = true;
   renderRes();
   setPhase('booting');
-  const opts = { gpu: userGpu, game: optGame.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, cache: userCache, ublock: optUblock.checked, res: resApplied };
+  const opts = { gpu: userGpu, game: optGame.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, cache: userCache, ublockOptIn: optUblock.checked, res: resApplied };
   const useCache = opts.cache && env.opfs && !env.coop;
   // The profile is saved only on the website running multi-threaded (OPFS).
   const savedProfile = env.opfs && !env.coop;
@@ -1071,7 +1071,7 @@ async function launch() {
       else console.log(`[proxyfox.html] Firefox settings: ${savedPrefs ? 'read back from prefs.js, ' : ''}saved to prefs.js when they change`);
     }
     if (manifest.build.ublock && decoded.chromeIndex.files.has(`${UBLOCK_DIR}/manifest.json`)) {
-      const u = await gecko.evalChrome(ublockInstall(manifest.build.ublock, opts.ublock)).catch((e) => String(e));
+      const u = await gecko.evalChrome(ublockInstall(manifest.build.ublock, opts.ublockOptIn)).catch((e) => String(e));
       if (u !== 'ok') console.warn('[proxyfox.html] uBlock Origin:', u);
     }
     if (res.scale !== 1) {
