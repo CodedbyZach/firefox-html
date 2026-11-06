@@ -251,7 +251,7 @@ body.res-scaled #screen, body.res-scaled #popup-overlay, body.res-scaled [data-l
           <label class="toggle"><input type="checkbox" id="opt-gpu"><span><b>GPU acceleration</b><small>WebRender through your browser's WebGL2: smoother scrolling and animation. Off by default; Improve Gaming Performance (below) turns it on when your GPU is faster than drawing in software.</small><small id="gpu-forced" class="forced" hidden>On because Resolution is above Current.</small><small id="gpu-game" class="forced" hidden>On because Improve Gaming Performance is on and your GPU is faster than drawing in software.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-quiet"><span><b>Block Firefox's background calls to Mozilla</b><small>Like desktop Firefox, the engine contacts Remote Settings and a region service on its own. On by default: these Firefox prefs keep it local. Sites you open are unaffected.</small></span></label>
           <label class="toggle"><input type="checkbox" id="opt-cache"><span><b>Save websites' files between visits</b><small>Firefox's disk cache, kept in this site's storage in your browser: pages you visited before load from your device instead of downloading again (about 3 times faster in testing). On by default.</small><small id="cache-unavailable" class="forced" hidden>Not available here: opened as a file or single-threaded, Firefox's profile isn't saved.</small></span></label>
-          <label class="toggle"><input type="checkbox" id="opt-ublock"><span><b>Block ads with uBlock Origin</b><small>uBlock Origin comes preinstalled. When Firefox starts, it loads its filter lists in the background: Firefox can pause while it does (about a minute the first time, then about 20 to 30 seconds at later launches, in testing), and it uses about 2 GB more memory. On by default on the website on devices with 8 GB of memory or more. Off by default on smaller devices, in a downloaded file and in single-thread mode (those don't save the profile, so every launch would be a first time). You can also turn it off or change its settings in Firefox's Add-ons.</small></span></label>
+          <label class="toggle"><input type="checkbox" id="opt-ublock"><span><b>Block ads with uBlock Origin</b><small>uBlock Origin comes preinstalled. Off by default: when Firefox starts, it loads its filter lists in the background, and Firefox can pause while it does (about a minute the first time, then about 20 to 30 seconds at later launches, in testing), and it uses about 2 GB more memory. A downloaded file or single-thread mode doesn't save the profile, so there every launch is a first time. Once it's on, you can also change its settings in Firefox's Add-ons.</small></span></label>
           <label class="field"><span>WISP server</span><small>WebSocket relay that Gecko's network stack (Necko) tunnels TCP through. Browsers cannot open raw sockets, so websites load through this relay. HTTPS stays encrypted end to end (Gecko does the encryption); plain HTTP pages are visible to the relay. Change it to use another relay, or clear it to load only local pages.</small><input type="text" id="opt-wisp" spellcheck="false" autocomplete="off"></label>
           <label class="field"><span>Open after launch</span><small>Optional URL for the first tab, for example <code>about:mozilla</code> or <code>https://example.com/</code>.</small><input type="text" id="opt-start" spellcheck="false" autocomplete="off" placeholder="(Firefox default)"></label>
         </div>
@@ -3764,6 +3764,20 @@ var GLUE_PATCHES = [
     name: "memory above 2 GB: XPCOM call arguments",
     from: "[(off >> 2) + 1 >>> 0] = 0;",
     to: "[(off >>> 2) + 1 >>> 0] = 0;"
+  },
+  {
+    // The arguments of a call into a website's WebAssembly (and of its table calls), which the
+    // engine lays out as doubles; above 2 GB the signed shift read them from the wrong place.
+    name: "memory above 2 GB: arguments of calls into websites' WebAssembly",
+    count: 2,
+    from: "var base = argsptr >> 3;",
+    to: "var base = argsptr >>> 3;"
+  },
+  {
+    // The same for a website's WebAssembly calling back into the engine (its imports).
+    name: "memory above 2 GB: arguments of websites' WebAssembly calling the engine",
+    from: "var base = scratch >> 3;",
+    to: "var base = scratch >>> 3;"
   }
 ];
 function patchGlue(src) {
@@ -4785,7 +4799,8 @@ var ublockInstall = ({ id, version }, on) => `(() => {
     const a = (await AddonManager.maybeInstallBuiltinAddon(${JSON.stringify(id)}, ${JSON.stringify(version)}, ${JSON.stringify(UBLOCK_URL)})) || had;
     if (a && !a.isActive && Services.prefs.getBoolPref(OFF_PREF, false)) await a.enable();
     Services.prefs.clearUserPref(OFF_PREF);
-    say(!a ? 'not installed' : (a === had ? a.version + ' installed' : 'installed ' + a.version) + (a.userDisabled ? ', turned off in Add-ons' : ''));
+    // (Right after a fresh install the add-on can still read as disabled while it starts.)
+    say(!a ? 'not installed' : a === had ? a.version + ' installed' + (a.userDisabled ? ', turned off in Add-ons' : '') : 'installed ' + a.version);
     // First setup: its filter lists take about a minute to prepare, during which Firefox
     // pauses now and then. Say so, so it isn't taken for a crash.
     if (a && !had) {
@@ -5109,7 +5124,7 @@ async function main() {
   await runChecks();
   userGpu = saved.gpu ?? false;
   userCache = saved.cache ?? true;
-  optUblock.checked = saved.ublock ?? (env.opfs && !env.coop && (navigator.deviceMemory || 0) >= 8);
+  optUblock.checked = saved.ublockOptIn ?? false;
   optUblock.disabled = !manifest.build.ublock;
   const canCache = env.opfs && !env.coop;
   optCache.checked = userCache && canCache;
@@ -5179,7 +5194,7 @@ async function launch() {
   for (const el of [optGpu, optGame, optWisp, optStart, optQuiet, optCache, optUblock, optRes]) el.disabled = true;
   renderRes();
   setPhase("booting");
-  const opts = { gpu: userGpu, game: optGame.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, cache: userCache, ublock: optUblock.checked, res: resApplied };
+  const opts = { gpu: userGpu, game: optGame.checked, wisp: normalizeWispUrl(optWisp.value), start: optStart.value.trim(), quiet: optQuiet.checked, cache: userCache, ublockOptIn: optUblock.checked, res: resApplied };
   const useCache = opts.cache && env.opfs && !env.coop;
   const savedProfile = env.opfs && !env.coop;
   const savedPrefs = savedProfile ? await readSavedPrefs() : null;
@@ -5261,7 +5276,7 @@ pref("layout.css.devPixelsPerPx", "${res.scale}");
       else console.log(`[proxyfox.html] Firefox settings: ${savedPrefs ? "read back from prefs.js, " : ""}saved to prefs.js when they change`);
     }
     if (manifest.build.ublock && decoded.chromeIndex.files.has(`${UBLOCK_DIR}/manifest.json`)) {
-      const u = await gecko.evalChrome(ublockInstall(manifest.build.ublock, opts.ublock)).catch((e) => String(e));
+      const u = await gecko.evalChrome(ublockInstall(manifest.build.ublock, opts.ublockOptIn)).catch((e) => String(e));
       if (u !== "ok") console.warn("[proxyfox.html] uBlock Origin:", u);
     }
     if (res.scale !== 1) {

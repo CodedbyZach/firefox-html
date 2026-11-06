@@ -194,6 +194,20 @@ export const GLUE_PATCHES = [
     from: '[(off >> 2) + 1 >>> 0] = 0;',
     to: '[(off >>> 2) + 1 >>> 0] = 0;',
   },
+  {
+    // The arguments of a call into a website's WebAssembly (and of its table calls), which the
+    // engine lays out as doubles; above 2 GB the signed shift read them from the wrong place.
+    name: 'memory above 2 GB: arguments of calls into websites\' WebAssembly',
+    count: 2,
+    from: 'var base = argsptr >> 3;',
+    to: 'var base = argsptr >>> 3;',
+  },
+  {
+    // The same for a website's WebAssembly calling back into the engine (its imports).
+    name: 'memory above 2 GB: arguments of websites\' WebAssembly calling the engine',
+    from: 'var base = scratch >> 3;',
+    to: 'var base = scratch >>> 3;',
+  },
 ];
 
 /** Applies GLUE_PATCHES; returns the patched glue and the names of patches that didn't apply. */
