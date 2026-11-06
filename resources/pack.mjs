@@ -27,6 +27,7 @@ import { build } from 'esbuild';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { patchGlueForCoop, COOP_MARKER } from './coop-glue.mjs';
@@ -172,6 +173,18 @@ function engineFromHtml(file) {
 
 const engine = ENGINE_FROM ? engineFromHtml(path.resolve(ENGINE_FROM)) : engineFromBuild();
 const { assets } = engine;
+// uBlock Origin, preinstalled: the unpacked extension that make-ublock.mjs (build.sh ublock)
+// wrote to resources/ublock/. app.js adds it to the front-end files and installs it.
+const UBLOCK_DIR = path.join(HERE, 'ublock');
+const ublock = JSON.parse(fs.readFileSync(must(path.join(UBLOCK_DIR, 'ublock.json'), 'build it with ./build.sh ublock (resources/make-ublock.mjs)'), 'utf8'));
+{
+  const zst = fs.readFileSync(must(path.join(UBLOCK_DIR, 'ublock.tar.zst'), 'build it with ./build.sh ublock (resources/make-ublock.mjs)'));
+  if (typeof zlib.zstdDecompressSync === 'function') {
+    const tar = zlib.zstdDecompressSync(zst);
+    if (tar.length !== ublock.tarSize || sha256(tar) !== ublock.tarSha256) throw new Error('resources/ublock/ublock.tar.zst does not match ublock.json');
+  }
+  assets.push({ name: 'ublock.tar', bytes: zst, compression: 'zstd', size: ublock.tarSize, sha256Raw: ublock.tarSha256 });
+}
 // app.js patches the glue when the page loads (src/glue-patches.js); each must still apply.
 {
   const { missing } = patchGlue(assets[0].bytes.toString('utf8'));
@@ -189,6 +202,7 @@ const manifest = {
   }])),
   build: {
     ...engine.build,
+    ublock: { id: ublock.id, version: ublock.version },
     date: new Date().toISOString().slice(0, 10),
     defaultWisp: process.env.WISP_URL ?? DEFAULT_WISP_URL,
   },
@@ -281,10 +295,17 @@ const licenseText = [
   'wisp-js client (bundled, @mercuryworkshop/wisp-js 0.4.1): AGPL-3.0, source https://github.com/MercuryWorkshop/wisp-js',
   'zstddec 0.2.0 (bundled): MIT, https://github.com/donmccurdy/zstddec',
   'Icons: Lucide, ISC License, https://lucide.dev',
+  `uBlock Origin ${ublock.version} (preinstalled): GPL-3.0, by Raymond Hill and contributors.`,
+  `  Source: https://github.com/gorhill/uBlock @ ${ublock.sources['gorhill/uBlock']}`,
+  `  Its default filter lists, from https://github.com/uBlockOrigin/uAssets @ ${ublock.sources['uBlockOrigin/uAssets gh-pages'].slice(0, 12)} (gh-pages)`,
+  `  and ${ublock.sources['uBlockOrigin/uAssets master'].slice(0, 12)} (master): uBlock filters, GPL-3.0; EasyList and EasyPrivacy, GPL-3.0`,
+  '  or CC BY-SA 3.0 (https://easylist.to/pages/licence.html); Peter Lowe\'s list (https://pgl.yoyo.org/adservers/policy.php);',
+  '  URLhaus filter, CC0 1.0 (https://gitlab.com/malware-filter/urlhaus-filter); Public Suffix List, MPL-2.0.',
   rule('Mozilla Public License 2.0 (Gecko, Firefox, firefox-wasm)'), mpl,
   rule('GNU AGPL 3.0 (proxyfox.html\'s own code, @mercuryworkshop/wisp-js)'), depLicense('@mercuryworkshop/wisp-js'),
   rule('MIT (zstddec)'), depLicense('zstddec'),
   rule('ISC (Lucide icons)'), fs.readFileSync(path.join(HERE, 'src', 'licenses', 'lucide-ISC.txt'), 'utf8'),
+  rule('GNU GPL 3.0 (uBlock Origin)'), fs.readFileSync(path.join(HERE, 'src', 'licenses', 'ublock-GPL-3.0.txt'), 'utf8'),
 ].join('\n');
 const header = `<!-- proxyfox.html: Made by CodedbyZach (zmandem7). Gecko ${manifest.build.geckoVersion} compiled to WebAssembly in one file. The page's own code is licensed under the GNU AGPL 3.0 with an attribution term: copies and changed versions must keep "Made by CodedbyZach (zmandem7)". Unofficial build; Firefox is a trademark of the Mozilla Foundation. Source links and full license texts: Licenses section at the bottom of the page. -->`;
 

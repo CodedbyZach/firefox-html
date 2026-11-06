@@ -9,14 +9,14 @@
     powershell -ExecutionPolicy Bypass -File .\build.ps1          all stages (deps, clone, engine, pack)
     powershell -ExecutionPolicy Bypass -File .\build.ps1 pack     re-pack proxyfox.html from an existing build
 
-  Stages: all, deps, clone, engine, pack.
+  Stages: all, deps, clone, engine, pack, ublock.
   -WispUrl wss://relay.example.com/  bakes another default WISP relay (for websites) into
                                      proxyfox.html. Without it the default is wss://itcode.vip/api/.
 #>
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)]
-  [ValidateSet('all', 'deps', 'clone', 'engine', 'pack')]
+  [ValidateSet('all', 'deps', 'clone', 'engine', 'pack', 'ublock')]
   [string]$Stage = 'all',
   [string]$Distro = 'Ubuntu-24.04',
   [string]$LinuxDir = '~/firefox-html-build',

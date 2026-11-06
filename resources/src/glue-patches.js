@@ -2,7 +2,8 @@
 // build produced it). app.js applies them to the decoded glue before anything runs it, so
 // the page thread, every engine Worker and single-thread mode all get the same glue; the
 // embedded bytes and their SHA-256 stay as built. pack.mjs checks at pack time that every
-// patch still applies. Each `from` is an exact, unique match against that glue.
+// patch still applies. Each `from` is an exact match against that glue, found exactly once
+// (or `count` times, all replaced).
 
 export const GLUE_PATCHES = [
   {
@@ -113,18 +114,99 @@ export const GLUE_PATCHES = [
       '  try {\n' +
       '    reg.decoder.configure(reg.soft ? reg.softConfig : reg.config);\n',
   },
+  {
+    // A website's WebGL runs on a real WebGL context of this browser. glGetString kept one
+    // answer per thread, not per context, so after a page made a WebGL 1 canvas every
+    // later WebGL 2 canvas was told "OpenGL ES 2.0" and Firefox refused it ("WebGL 2
+    // requires support for the following features: prim_restart_fixed"). The answers are
+    // now kept per WebGL version.
+    name: 'WebGL 2 works after a WebGL 1 canvas (GL strings per WebGL version)',
+    from: 'function _emscripten_glGetString(name_) {\n  var ret = GL.stringCache[name_];\n',
+    to: 'function _emscripten_glGetString(name_) {\n' +
+      '  var stringKey = (GL.currentContext && GL.currentContext.version >= 2 ? "2:" : "1:") + name_;\n' +
+      '  var ret = GL.stringCache[stringKey];\n',
+  },
+  {
+    name: 'WebGL 2 works after a WebGL 1 canvas (store)',
+    from: '    GL.stringCache[name_] = ret;\n',
+    to: '    GL.stringCache[stringKey] = ret;\n',
+  },
+  {
+    // GPU mode: WebRender keeps BGRA images in RGBA textures and swaps red and blue back
+    // in its shaders (swizzleColor0, set per draw by uColor0Swizzle). The compositing
+    // shader didn't, so anything shown as its own layer (a website's <canvas>, 2D or
+    // WebGL) came out with red and blue swapped. WebRender sets the uniform when it binds
+    // an image (1 for BGRA images, 0 for its own render targets), so the rest is unchanged.
+    name: 'GPU mode: canvas colors (composite shader swaps BGRA like the image shaders)',
+    from: '  try { source = __wrHoistVaryings(source); } catch(e){}\n',
+    to: '  try { source = __wrHoistVaryings(source); } catch(e){}\n' +
+      '  if (/^\\/\\/ shader: composite\\b/m.test(source) && /^#define WR_FRAGMENT_SHADER\\b/m.test(source) &&\n' +
+      '      source.indexOf("vec4 swizzleColor0(") >= 0)\n' +
+      '    source = source.replace("vec4 texel = TEX_SAMPLE(sColor0, uv);", "vec4 texel = swizzleColor0(TEX_SAMPLE(sColor0, uv));");\n',
+  },
+  // Memory above 2 GB. The engine's heap can grow to 4 GB (uBlock Origin's first setup takes
+  // it to about 3 GB; a big game can too), but the glue's own JavaScript for the relay, the
+  // profile, images, video, audio and websites' WebAssembly took the engine's pointers as
+  // signed 32-bit numbers: above 2 GB they turned negative, and .slice() then read the wrong
+  // bytes (or none) and the shared control blocks were written at negative indexes. These read
+  // them as unsigned (count: the number of sites each replaces, all of them).
+  {
+    name: 'memory above 2 GB: control blocks indexed unsigned',
+    count: 15,
+    from: 'ctrl >> 2',
+    to: 'ctrl >>> 2',
+  },
+  {
+    name: 'memory above 2 GB: codec descriptions',
+    count: 2,
+    from: '.slice(descPtr, descPtr + descLen)',
+    to: '.slice(descPtr >>> 0, (descPtr >>> 0) + descLen)',
+  },
+  {
+    name: 'memory above 2 GB: video, audio and image data',
+    count: 4,
+    from: '.slice(dataPtr, dataPtr + dataLen)',
+    to: '.slice(dataPtr >>> 0, (dataPtr >>> 0) + dataLen)',
+  },
+  {
+    name: 'memory above 2 GB: profile writes',
+    from: '.slice(dataPtr, dataPtr + len)',
+    to: '.slice(dataPtr >>> 0, (dataPtr >>> 0) + len)',
+  },
+  {
+    name: 'memory above 2 GB: relay sends and websites\' WebAssembly',
+    count: 2,
+    from: '.slice(ptr, ptr + len)',
+    to: '.slice(ptr >>> 0, (ptr >>> 0) + len)',
+  },
+  {
+    name: 'memory above 2 GB: file reads',
+    from: '.slice(buf, buf + length)',
+    to: '.slice(buf >>> 0, (buf >>> 0) + length)',
+  },
+  {
+    name: 'memory above 2 GB: file sizes',
+    from: '[(outSize >> 2) + 1 >>> 0]',
+    to: '[(outSize >>> 2) + 1 >>> 0]',
+  },
+  {
+    name: 'memory above 2 GB: XPCOM call arguments',
+    from: '[(off >> 2) + 1 >>> 0] = 0;',
+    to: '[(off >>> 2) + 1 >>> 0] = 0;',
+  },
 ];
 
 /** Applies GLUE_PATCHES; returns the patched glue and the names of patches that didn't apply. */
 export function patchGlue(src) {
   const missing = [];
   for (const p of GLUE_PATCHES) {
+    const want = p.count ?? 1;
     const n = src.split(p.from).length - 1;
-    if (n !== 1) {
-      missing.push(`${p.name} (site found ${n} times)`);
+    if (n !== want) {
+      missing.push(`${p.name} (site found ${n} times, expected ${want})`);
       continue;
     }
-    src = src.replace(p.from, () => p.to);
+    src = src.split(p.from).join(p.to);
   }
   return { src, missing };
 }
