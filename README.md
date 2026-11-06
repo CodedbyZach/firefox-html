@@ -51,8 +51,9 @@ If Firefox stops with an error while the switch is on, the page offers to reload
 
 ## Host it
 
-Upload `proxyfox.html` to any web host, with `favicon.ico` (the tab icon) next to it. For the
-installable app, also upload `sw.js`, `manifest.webmanifest`, `icons/`, `index.html` and `404.html`.
+Upload `proxyfox.html` to any web host, with the `icons/` folder next to it (`icons/favicon.ico` is
+the tab icon). For the installable app, also upload `sw.js`, `manifest.webmanifest`, `index.html`
+and `404.html`.
 
 For multi-threading the page needs two response headers:
 
@@ -126,8 +127,8 @@ It runs the first four stages below. You can also run one at a time, for example
 | File | What it is |
 | --- | --- |
 | `proxyfox.html` | The browser, in one file. |
-| `favicon.ico` | The tab icon of every page. Replace it with your own (same name) to change it. |
-| `sw.js`, `manifest.webmanifest`, `icons/` | The installable app (its icons are the PNGs in `icons/`). |
+| `icons/` | `favicon.ico`, the tab icon of every page (replace it with your own, same name, to change it), and the installed app's icons (the PNGs). |
+| `sw.js`, `manifest.webmanifest` | The installable app. |
 | `index.html`, `404.html` | Send the site's front page, and old links to `firefox.html`, to `proxyfox.html`. |
 | `build.sh`, `build.ps1` | The build (Linux, and Windows through WSL). |
 | `resources/` | The packer, the page's source (`src/`), the engine patches (`patches/`) and the preinstalled uBlock Origin (`ublock/`). |
